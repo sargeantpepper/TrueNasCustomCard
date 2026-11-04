@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.2.0";
+const CARD_VERSION = "2.2.1";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -544,6 +544,10 @@ const LABELS = {
 
 const EDITOR_SCHEMA = [
   { name: "title", selector: { text: {} } },
+  { name: "pools", selector: { entity: { multiple: true, domain: ["sensor", "binary_sensor"] } } },
+  { name: "disks", selector: { entity: { multiple: true, domain: "sensor" } } },
+  { name: "apps", selector: { entity: { multiple: true, domain: ["binary_sensor", "switch"] } } },
+  { name: "vms", selector: { entity: { multiple: true, domain: ["binary_sensor", "switch"] } } },
   {
     name: "sections",
     selector: {
@@ -591,10 +595,6 @@ const EDITOR_SCHEMA = [
       { name: "crit_pct", selector: { number: { min: 1, max: 100, mode: "box" } } },
     ],
   },
-  { name: "pools", selector: { entity: { multiple: true, domain: ["sensor", "binary_sensor"] } } },
-  { name: "disks", selector: { entity: { multiple: true, domain: "sensor" } } },
-  { name: "apps", selector: { entity: { multiple: true, domain: ["binary_sensor", "switch"] } } },
-  { name: "vms", selector: { entity: { multiple: true, domain: ["binary_sensor", "switch"] } } },
   { name: "prefix", selector: { text: {} } },
   { name: "cpu", selector: { entity: { domain: "sensor" } } },
   { name: "memory", selector: { entity: { domain: "sensor" } } },
