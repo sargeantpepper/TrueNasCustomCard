@@ -213,7 +213,18 @@ class TrueNASCard extends HTMLElement {
       return a.length ? a : all.filter(pred);
     };
 
-    const pools = pick((s) => bin(s) && attr(s, "scrub_state") && attr(s, "is_decrypted"), c.pools);
+    let pools = pick((s) => (bin(s) || sen(s)) && (attr(s, "scrub_state") || attr(s, "is_decrypted") || attr(s, "autotrim")), c.pools);
+    {
+      // one entry per pool, preferring the health binary sensor
+      const byPool = new Map();
+      for (const p of pools) {
+        const a = p.attributes;
+        const key = String(a.path || a.name || (a.friendly_name || p.entity_id).replace(/\s*(health|free|usage)$/i, "")).toLowerCase();
+        const cur = byPool.get(key);
+        if (!cur || (bin(p) && !bin(cur))) byPool.set(key, p);
+      }
+      pools = [...byPool.values()];
+    }
     const vms = pick((s) => bin(s) && attr(s, "autostart") && attr(s, "memory") && attr(s, "type"), c.vms);
     const apps = pick((s) => bin(s) && attr(s, "update_available") && attr(s, "latest_version"), c.apps);
     const services = pick((s) => bin(s) && attr(s, "enable") && attr(s, "state") && !attr(s, "scrub_state"), c.services);
@@ -300,12 +311,20 @@ class TrueNASCard extends HTMLElement {
     return chips.length ? item.replace(/<\/div>\s*$/, `<div class="chips">${chips.join("")}</div></div>`) : item;
   }
 
+  _poolHealthy(p) {
+    const a = p.attributes;
+    if (p.entity_id.startsWith("binary_sensor.")) return p.state === "on";
+    if (a.healthy !== undefined) return a.healthy === true || a.healthy === "true";
+    return String(a.status || "ONLINE").toUpperCase() === "ONLINE";
+  }
+
   _poolItem(p) {
     const a = p.attributes;
-    const name = (a.friendly_name || p.entity_id).replace(/^truenas\s*/i, "").replace(/\s*health$/i, "");
-    const healthy = p.state === "on";
+    const name = (a.friendly_name || p.entity_id).replace(/^(truenas|pools?)\s+/i, "").replace(/\s*health$/i, "");
+    const healthy = this._poolHealthy(p);
     const poolName = (a.path ? String(a.path).split("/").filter(Boolean).pop() : name).toLowerCase().replace(/-/g, "_");
-    const cap = Object.values(this._hass.states).find(
+    const hasCap = (s) => s.attributes.total_value !== undefined || s.attributes.total_gib !== undefined || s.attributes.total_gb !== undefined || s.attributes.free_gib !== undefined || s.attributes.free_gb !== undefined;
+    const cap = (p.entity_id.startsWith("sensor.") && hasCap(p) ? p : null) || Object.values(this._hass.states).find(
       (s) =>
         s.entity_id.startsWith("sensor.") &&
         s.entity_id.toLowerCase().replace(/-/g, "_").includes(poolName) &&
@@ -420,7 +439,7 @@ class TrueNASCard extends HTMLElement {
 
     const isOn = (e) => e.state === "on";
     const updCount = d.apps.filter((a) => a.attributes.update_available === true || a.attributes.update_available === "true").length;
-    const badPools = d.pools.filter((p) => !isOn(p)).length;
+    const badPools = d.pools.filter((p) => !this._poolHealthy(p)).length;
     const hotDisks = d.disks.filter((x) => (num(x.state) ?? 0) >= c.crit_temp).length;
 
     let tone = "ok", sub = "All healthy";
@@ -437,7 +456,7 @@ class TrueNASCard extends HTMLElement {
     let body = "";
     for (const key of c.sections) {
       if (key === "system") body += `<div class="block"><div class="stitle">System</div>${this._systemItem(d.system)}</div>`;
-      else if (key === "pools" && d.pools.length) body += `<div class="block"><div class="stitle">Pools</div>${d.pools.map((p) => this._poolItem(p)).join("")}</div>`;
+      else if (key === "pools") body += `<div class="block"><div class="stitle">Pools</div>${d.pools.length ? d.pools.map((p) => this._poolItem(p)).join("") : `<div class="empty">No pools found. Set <code>pools:</code> to your pool entities in the card YAML.</div>`}</div>`;
       else if (key === "bays") body += this._bays(d.disks);
     }
     for (const key of c.sections) {
