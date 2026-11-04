@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.3.0";
+const CARD_VERSION = "2.3.1";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -214,7 +214,9 @@ class TrueNASCard extends HTMLElement {
     };
 
     this._poolExtras = new Map();
-    let pools = pick((s) => (bin(s) || sen(s)) && (attr(s, "scrub_state") || attr(s, "is_decrypted") || attr(s, "autotrim")), c.pools);
+    const rootDs = (s) => sen(s) && attr(s, "pool") && attr(s, "mountpoint") &&
+      String(s.attributes.mountpoint).replace(/\/+$/, "") === "/mnt/" + s.attributes.pool;
+    let pools = pick((s) => ((bin(s) || sen(s)) && (attr(s, "scrub_state") || attr(s, "is_decrypted") || attr(s, "autotrim"))) || rootDs(s), c.pools);
     {
       // one entry per pool, preferring the health binary sensor
       const groups = new Map();
@@ -353,13 +355,16 @@ class TrueNASCard extends HTMLElement {
         else if (out.used == null && out.free == null) out.free = g; // tomaae pool sensor state is free space
       }
     }
+    if (out.total == null && out.used != null && out.free != null) out.total = out.used + out.free;
     out.ok = out.pct != null || (out.total != null && (out.used != null || out.free != null));
     return out;
   }
 
   _poolKey(e) {
     const a = e.attributes || {};
-    if (a.path) return String(a.path).split("/").filter(Boolean).pop().toLowerCase();
+    if (a.pool) return String(a.pool).toLowerCase();
+    const p = a.path || a.mountpoint;
+    if (p) return String(p).split("/").filter(Boolean).pop().toLowerCase();
     return String(a.name || (a.friendly_name || e.entity_id.split(".")[1]))
       .toLowerCase().replace(/^(truenas|pools?)[\s_]+/, "").replace(/[\s_]+(health|healthy|free|usage|used|space|pool)$/g, "").trim();
   }
@@ -373,9 +378,9 @@ class TrueNASCard extends HTMLElement {
 
   _poolItem(p) {
     const a = p.attributes;
-    const name = (a.friendly_name || p.entity_id).replace(/^(truenas|pools?)\s+/i, "").replace(/\s*health$/i, "");
+    const name = String(a.pool || (a.friendly_name || p.entity_id).replace(/^(truenas|pools?|datasets?)\s+/i, "").replace(/\s*health$/i, ""));
     const healthy = this._poolHealthy(p);
-    const poolName = (a.path ? String(a.path).split("/").filter(Boolean).pop() : name).toLowerCase().replace(/-/g, "_");
+    const poolName = this._poolKey(p).replace(/-/g, "_");
     const caps = [p, ...(this._poolExtras.get(p.entity_id) || [])].map((e) => this._capacity(e));
     const auto = caps.some((x) => x.pct != null || (x.total != null && (x.used != null || x.free != null)))
       ? null
@@ -386,7 +391,8 @@ class TrueNASCard extends HTMLElement {
         );
     if (auto) caps.push(this._capacity(auto));
     const pick = (k) => caps.map((x) => x[k]).find((v) => v != null);
-    const sub = ["Pool", a.status || (healthy ? "ONLINE" : "UNHEALTHY")];
+    const status = a.status || [p, ...(this._poolExtras.get(p.entity_id) || [])].map((e) => e.attributes.status).find(Boolean);
+    const sub = ["Pool", status || (p.entity_id.startsWith("binary_sensor.") ? (healthy ? "ONLINE" : "UNHEALTHY") : "")].filter(Boolean);
     if (a.scrub_state && a.scrub_state !== "NONE") sub.push("scrub " + String(a.scrub_state).toLowerCase());
     let bars = "", pct = 0;
     {
