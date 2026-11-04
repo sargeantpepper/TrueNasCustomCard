@@ -10,7 +10,6 @@ const CARD_VERSION = "2.1.0";
 
 const DEFAULTS = {
   title: "TrueNAS",
-  system_name: "TrueNAS",
   prefix: "truenas", // biases discovery; useful with several systems
   sections: ["system", "pools", "bays", "disks", "apps", "vms"], // add "services" if wanted
   expand: [], // collapsible groups (disks, apps, vms, services) that start open
@@ -265,7 +264,7 @@ class TrueNASCard extends HTMLElement {
     return `<div class="item t-${tone}">
       <div class="top" data-e="${esc(id)}">
         <div class="ico tint"><ha-icon icon="${icon}"></ha-icon><span class="dot"></span></div>
-        <div class="tx"><div class="nm">${esc(name)}${upd ? '<span class="upd">update</span>' : ""}</div><div class="sb">${esc(sub)}</div></div>
+        <div class="tx"><div class="nm">${esc(name)}${upd ? '<span class="upd">update</span>' : ""}</div>${sub ? `<div class="sb">${esc(sub)}</div>` : ""}</div>
         ${acts ? `<div class="acts">${acts}</div>` : ""}
       </div>
       ${bars ? `<div class="bars">${bars}</div>` : ""}
@@ -283,9 +282,9 @@ class TrueNASCard extends HTMLElement {
   }
 
   _systemItem(s, upd) {
-    const parts = ["System"];
+    const parts = [];
     const up = s.uptime && fmtUp(s.uptime.state);
-    if (up) parts.push("up " + up);
+    if (up) parts.push("Up " + up);
     if (s.temp && num(s.temp.state) != null) parts.push(`${num(s.temp.state).toFixed(0)}°C`);
     const cpu = s.cpu && num(s.cpu.state), mem = s.mem && num(s.mem.state);
     let bars = "";
@@ -297,7 +296,7 @@ class TrueNASCard extends HTMLElement {
     const chips = [];
     if (s.load && num(s.load.state) != null) chips.push(`<span class="chip">Load <b>${num(s.load.state).toFixed(2)}</b></span>`);
     if (s.arc && num(s.arc.state) != null) chips.push(`<span class="chip">ARC <b>${num(s.arc.state).toFixed(1)} ${esc(s.arc.attributes.unit_of_measurement || "")}</b></span>`);
-    const item = this._item({ id: id || "", icon: "mdi:server", tone, name: this._config.system_name, sub: parts.join(" · "), bars });
+    const item = this._item({ id: id || "", icon: "mdi:server", tone, name: parts.join(" · ") || "Online", sub: "", bars });
     return chips.length ? item.replace(/<\/div>\s*$/, `<div class="chips">${chips.join("")}</div></div>`) : item;
   }
 
@@ -501,7 +500,6 @@ class TrueNASCard extends HTMLElement {
 
 const LABELS = {
   title: "Title",
-  system_name: "System row name",
   prefix: "Entity prefix (optional, biases discovery)",
   sections: "Sections to show",
   expand: "Panels that start open",
@@ -523,7 +521,6 @@ const LABELS = {
 
 const EDITOR_SCHEMA = [
   { name: "title", selector: { text: {} } },
-  { name: "system_name", selector: { text: {} } },
   {
     name: "sections",
     selector: {
