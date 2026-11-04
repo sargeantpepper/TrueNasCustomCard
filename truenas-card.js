@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.1.0";
+const CARD_VERSION = "2.2.0";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -530,6 +530,10 @@ const LABELS = {
   crit_temp: "Disk critical temperature (°C)",
   warn_pct: "Usage warning (%)",
   crit_pct: "Usage critical (%)",
+  pools: "Pools (leave empty to auto-detect)",
+  disks: "Disks (leave empty to auto-detect)",
+  apps: "Apps (leave empty to auto-detect)",
+  vms: "Virtual machines (leave empty to auto-detect)",
   cpu: "CPU usage sensor",
   memory: "Memory usage sensor",
   cpu_temp: "CPU temperature sensor",
@@ -587,6 +591,10 @@ const EDITOR_SCHEMA = [
       { name: "crit_pct", selector: { number: { min: 1, max: 100, mode: "box" } } },
     ],
   },
+  { name: "pools", selector: { entity: { multiple: true, domain: ["sensor", "binary_sensor"] } } },
+  { name: "disks", selector: { entity: { multiple: true, domain: "sensor" } } },
+  { name: "apps", selector: { entity: { multiple: true, domain: ["binary_sensor", "switch"] } } },
+  { name: "vms", selector: { entity: { multiple: true, domain: ["binary_sensor", "switch"] } } },
   { name: "prefix", selector: { text: {} } },
   { name: "cpu", selector: { entity: { domain: "sensor" } } },
   { name: "memory", selector: { entity: { domain: "sensor" } } },
@@ -620,7 +628,7 @@ class TrueNASCardEditor extends HTMLElement {
       this.appendChild(this._form);
       const note = document.createElement("div");
       note.style.cssText = "margin-top:12px;font-size:.85em;opacity:.7";
-      note.textContent = "Pin disks to exact bays (bay_slots) and override apps / VMs / pools / disks lists in YAML.";
+      note.textContent = "Pin disks to exact bays with bay_slots in YAML.";
       this.appendChild(note);
     }
     if (this._hass) this._form.hass = this._hass;
