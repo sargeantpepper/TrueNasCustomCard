@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.2.1";
+const CARD_VERSION = "2.3.0";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -213,17 +213,23 @@ class TrueNASCard extends HTMLElement {
       return a.length ? a : all.filter(pred);
     };
 
+    this._poolExtras = new Map();
     let pools = pick((s) => (bin(s) || sen(s)) && (attr(s, "scrub_state") || attr(s, "is_decrypted") || attr(s, "autotrim")), c.pools);
     {
       // one entry per pool, preferring the health binary sensor
-      const byPool = new Map();
+      const groups = new Map();
       for (const p of pools) {
-        const a = p.attributes;
-        const key = String(a.path || a.name || (a.friendly_name || p.entity_id).replace(/\s*(health|free|usage)$/i, "")).toLowerCase();
-        const cur = byPool.get(key);
-        if (!cur || (bin(p) && !bin(cur))) byPool.set(key, p);
+        const k = this._poolKey(p);
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(p);
       }
-      pools = [...byPool.values()];
+      pools = [];
+      for (const g of groups.values()) {
+        // primary: health binary sensor, else the one with a status, else first
+        const primary = g.find(bin) || g.find((e) => e.attributes.status !== undefined) || g[0];
+        pools.push(primary);
+        this._poolExtras.set(primary.entity_id, g.filter((e) => e !== primary));
+      }
     }
     const vms = pick((s) => bin(s) && attr(s, "autostart") && attr(s, "memory") && attr(s, "type"), c.vms);
     const apps = pick((s) => bin(s) && attr(s, "update_available") && attr(s, "latest_version"), c.apps);
@@ -311,6 +317,53 @@ class TrueNASCard extends HTMLElement {
     return chips.length ? item.replace(/<\/div>\s*$/, `<div class="chips">${chips.join("")}</div></div>`) : item;
   }
 
+  // Reads capacity from any entity: % sensors, free/used sensors, or total/used/free/available attributes.
+  // All sizes returned in GiB.
+  _capacity(e) {
+    const out = { total: null, used: null, free: null, pct: null, ok: false };
+    if (!e) return out;
+    const a = e.attributes || {};
+    const toGiB = (v, key, unit) => {
+      const n = num(v);
+      if (n == null) return null;
+      const k = `${key || ""} ${unit || ""}`.toLowerCase();
+      if (/tib|\btb\b|_tb/.test(k)) return n * 1024;
+      if (/mib|\bmb\b|_mb/.test(k)) return n / 1024;
+      if (/bytes|\bb\b/.test(k) || n > 1e9) return n / 1024 ** 3;
+      return n; // gib / gb / unlabelled
+    };
+    for (const [k, v] of Object.entries(a)) {
+      const key = k.toLowerCase();
+      if (typeof v === "object" || num(v) == null) continue;
+      if (/(pct|percent|usage_percent)/.test(key) && /(used|usage)/.test(key) && out.pct == null) out.pct = num(v);
+      else if (/^(total|size)(_|$)/.test(key) && out.total == null) out.total = toGiB(v, key);
+      else if (/^(used|allocated|alloc)(_|$)/.test(key) && out.used == null) out.used = toGiB(v, key);
+      else if (/^(free|avail|available)(_|$)/.test(key) && out.free == null) out.free = toGiB(v, key);
+    }
+    const unit = a.unit_of_measurement || "";
+    const st = num(e.state);
+    if (st != null && e.entity_id.startsWith("sensor.")) {
+      const id = `${e.entity_id} ${a.friendly_name || ""}`.toLowerCase();
+      if (unit === "%") { if (out.pct == null) out.pct = /free|avail/.test(id) ? 100 - st : st; }
+      else if (/[KMGT]i?B/i.test(unit)) {
+        const g = toGiB(st, "", unit);
+        if (/free|avail/.test(id)) { if (out.free == null) out.free = g; }
+        else if (/used|usage/.test(id)) { if (out.used == null) out.used = g; }
+        else if (/total|size/.test(id)) { if (out.total == null) out.total = g; }
+        else if (out.used == null && out.free == null) out.free = g; // tomaae pool sensor state is free space
+      }
+    }
+    out.ok = out.pct != null || (out.total != null && (out.used != null || out.free != null));
+    return out;
+  }
+
+  _poolKey(e) {
+    const a = e.attributes || {};
+    if (a.path) return String(a.path).split("/").filter(Boolean).pop().toLowerCase();
+    return String(a.name || (a.friendly_name || e.entity_id.split(".")[1]))
+      .toLowerCase().replace(/^(truenas|pools?)[\s_]+/, "").replace(/[\s_]+(health|healthy|free|usage|used|space|pool)$/g, "").trim();
+  }
+
   _poolHealthy(p) {
     const a = p.attributes;
     if (p.entity_id.startsWith("binary_sensor.")) return p.state === "on";
@@ -323,28 +376,29 @@ class TrueNASCard extends HTMLElement {
     const name = (a.friendly_name || p.entity_id).replace(/^(truenas|pools?)\s+/i, "").replace(/\s*health$/i, "");
     const healthy = this._poolHealthy(p);
     const poolName = (a.path ? String(a.path).split("/").filter(Boolean).pop() : name).toLowerCase().replace(/-/g, "_");
-    const hasCap = (s) => s.attributes.total_value !== undefined || s.attributes.total_gib !== undefined || s.attributes.total_gb !== undefined || s.attributes.free_gib !== undefined || s.attributes.free_gb !== undefined;
-    const cap = (p.entity_id.startsWith("sensor.") && hasCap(p) ? p : null) || Object.values(this._hass.states).find(
-      (s) =>
-        s.entity_id.startsWith("sensor.") &&
-        s.entity_id.toLowerCase().replace(/-/g, "_").includes(poolName) &&
-        !s.entity_id.toLowerCase().includes("health") &&
-        (s.attributes.total_value !== undefined || s.attributes.total_gib !== undefined || s.attributes.total_gb !== undefined ||
-          s.attributes.free_gib !== undefined || s.attributes.free_gb !== undefined || /free/i.test(s.entity_id))
-    );
+    const caps = [p, ...(this._poolExtras.get(p.entity_id) || [])].map((e) => this._capacity(e));
+    const auto = caps.some((x) => x.pct != null || (x.total != null && (x.used != null || x.free != null)))
+      ? null
+      : Object.values(this._hass.states).find(
+          (s) => s.entity_id.startsWith("sensor.") && s.entity_id !== p.entity_id &&
+            s.entity_id.toLowerCase().replace(/-/g, "_").includes(poolName) && !/health/i.test(s.entity_id) &&
+            !s.attributes.serial && this._capacity(s).ok
+        );
+    if (auto) caps.push(this._capacity(auto));
+    const pick = (k) => caps.map((x) => x[k]).find((v) => v != null);
     const sub = ["Pool", a.status || (healthy ? "ONLINE" : "UNHEALTHY")];
     if (a.scrub_state && a.scrub_state !== "NONE") sub.push("scrub " + String(a.scrub_state).toLowerCase());
     let bars = "", pct = 0;
-    if (cap) {
-      const ca = cap.attributes;
-      const total = num(ca.total_gib ?? ca.total_gb ?? ca.total_value);
-      let free = num(ca.free_gib ?? ca.free_gb);
-      if (free == null && /free/i.test(cap.entity_id)) free = num(cap.state);
-      const used = num(ca.used_gib ?? ca.used_gb) ?? (total != null && free != null ? total - free : null);
-      if (total && used != null) {
-        pct = (used / total) * 100;
+    {
+      const total = pick("total");
+      const free = pick("free");
+      const used = pick("used") ?? (total != null && free != null ? total - free : null);
+      const p2 = pick("pct") ?? (total && used != null ? (used / total) * 100 : null);
+      if (p2 != null) {
+        pct = p2;
         bars = this._metric("Used", pct, pct.toFixed(0) + "%");
-        sub.push(`${fmtBytes(used)} of ${fmtBytes(total)}`);
+        if (total && used != null) sub.push(`${fmtBytes(used)} of ${fmtBytes(total)}`);
+        else if (free != null) sub.push(fmtBytes(free) + " free");
       } else if (free != null) sub.push(fmtBytes(free) + " free");
     }
     const tone = !healthy ? "bad" : pct >= this._config.crit_pct ? "bad" : pct >= this._config.warn_pct ? "warn" : "ok";
