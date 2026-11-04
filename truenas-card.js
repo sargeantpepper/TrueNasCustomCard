@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.0.0";
+const CARD_VERSION = "2.1.0";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -148,6 +148,21 @@ class TrueNASCard extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._open = null;
     this._sig = "";
+  }
+
+  static async getConfigElement() {
+    // HA lazy-loads ha-form; force it to load before our editor renders.
+    if (!customElements.get("ha-form")) {
+      try {
+        const helpers = await window.loadCardHelpers();
+        const entities = await helpers.createCardElement({ type: "entities", entities: [] });
+        await entities.constructor.getConfigElement();
+      } catch (e) {
+        /* fall through to the wait below */
+      }
+      await Promise.race([customElements.whenDefined("ha-form"), new Promise((r) => setTimeout(r, 4000))]);
+    }
+    return document.createElement("truenas-card-editor");
   }
 
   static getStubConfig() {
@@ -480,6 +495,137 @@ class TrueNASCard extends HTMLElement {
     );
   }
 }
+
+
+// ---------- visual editor ----------
+
+const LABELS = {
+  title: "Title",
+  system_name: "System row name",
+  prefix: "Entity prefix (optional, biases discovery)",
+  sections: "Sections to show",
+  expand: "Panels that start open",
+  controls: "Show start / stop buttons",
+  bay_vertical: "Tall drive trays",
+  bay_columns: "Bays per row (blank = auto)",
+  bay_count: "Total physical bays (blank = auto)",
+  warn_temp: "Disk warning temperature (°C)",
+  crit_temp: "Disk critical temperature (°C)",
+  warn_pct: "Usage warning (%)",
+  crit_pct: "Usage critical (%)",
+  cpu: "CPU usage sensor",
+  memory: "Memory usage sensor",
+  cpu_temp: "CPU temperature sensor",
+  uptime: "Uptime sensor",
+  load: "Load sensor",
+  arc: "ARC size sensor",
+};
+
+const EDITOR_SCHEMA = [
+  { name: "title", selector: { text: {} } },
+  { name: "system_name", selector: { text: {} } },
+  {
+    name: "sections",
+    selector: {
+      select: {
+        multiple: true,
+        mode: "list",
+        options: [
+          { value: "system", label: "System" },
+          { value: "pools", label: "Pools" },
+          { value: "bays", label: "Drive bays" },
+          { value: "disks", label: "Disks list" },
+          { value: "apps", label: "Apps" },
+          { value: "vms", label: "Virtual machines" },
+          { value: "services", label: "Services" },
+        ],
+      },
+    },
+  },
+  {
+    name: "expand",
+    selector: {
+      select: {
+        multiple: true,
+        mode: "list",
+        options: [
+          { value: "disks", label: "Disks list" },
+          { value: "apps", label: "Apps" },
+          { value: "vms", label: "Virtual machines" },
+          { value: "services", label: "Services" },
+        ],
+      },
+    },
+  },
+  { name: "controls", selector: { boolean: {} } },
+  { name: "bay_vertical", selector: { boolean: {} } },
+  {
+    type: "grid",
+    name: "",
+    schema: [
+      { name: "bay_columns", selector: { number: { min: 1, max: 12, mode: "box" } } },
+      { name: "bay_count", selector: { number: { min: 1, max: 60, mode: "box" } } },
+      { name: "warn_temp", selector: { number: { min: 10, max: 100, mode: "box" } } },
+      { name: "crit_temp", selector: { number: { min: 10, max: 100, mode: "box" } } },
+      { name: "warn_pct", selector: { number: { min: 1, max: 100, mode: "box" } } },
+      { name: "crit_pct", selector: { number: { min: 1, max: 100, mode: "box" } } },
+    ],
+  },
+  { name: "prefix", selector: { text: {} } },
+  { name: "cpu", selector: { entity: { domain: "sensor" } } },
+  { name: "memory", selector: { entity: { domain: "sensor" } } },
+  { name: "cpu_temp", selector: { entity: { domain: "sensor" } } },
+  { name: "uptime", selector: { entity: { domain: "sensor" } } },
+  { name: "load", selector: { entity: { domain: "sensor" } } },
+  { name: "arc", selector: { entity: { domain: "sensor" } } },
+];
+
+class TrueNASCardEditor extends HTMLElement {
+  setConfig(config) {
+    this._config = config || {};
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (this._form) this._form.hass = hass;
+  }
+
+  _render() {
+    if (!this._form) {
+      if (!customElements.get("ha-form")) {
+        this.textContent = "The form component could not be loaded. Edit this card in YAML, or refresh the page and try again.";
+        return;
+      }
+      this._form = document.createElement("ha-form");
+      this._form.computeLabel = (s) => LABELS[s.name] || s.name;
+      this._form.schema = EDITOR_SCHEMA;
+      this._form.addEventListener("value-changed", (ev) => this._changed(ev.detail.value));
+      this.appendChild(this._form);
+      const note = document.createElement("div");
+      note.style.cssText = "margin-top:12px;font-size:.85em;opacity:.7";
+      note.textContent = "Pin disks to exact bays (bay_slots) and override apps / VMs / pools / disks lists in YAML.";
+      this.appendChild(note);
+    }
+    if (this._hass) this._form.hass = this._hass;
+    this._form.data = { ...DEFAULTS, ...this._config };
+  }
+
+  _changed(value) {
+    const out = { ...this._config };
+    for (const [k, v] of Object.entries(value || {})) {
+      const empty = v === undefined || v === null || v === "" || (Array.isArray(v) && !v.length && k !== "expand" && k !== "sections");
+      const isDefault = k in DEFAULTS && JSON.stringify(DEFAULTS[k]) === JSON.stringify(v);
+      if (empty || isDefault) delete out[k];
+      else out[k] = v;
+    }
+    out.type = this._config.type || "custom:truenas-card";
+    this._config = out;
+    this.dispatchEvent(new CustomEvent("config-changed", { bubbles: true, composed: true, detail: { config: out } }));
+  }
+}
+
+if (!customElements.get("truenas-card-editor")) customElements.define("truenas-card-editor", TrueNASCardEditor);
 
 if (!customElements.get("truenas-card")) customElements.define("truenas-card", TrueNASCard);
 
