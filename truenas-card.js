@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.3.1";
+const CARD_VERSION = "2.4.0";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -214,9 +214,12 @@ class TrueNASCard extends HTMLElement {
     };
 
     this._poolExtras = new Map();
+    const poolCfg = Array.isArray(c.pools) ? c.pools : null;
+    const poolIds = poolCfg ? poolCfg.filter((x) => typeof x === "string") : null;
+    const manualPools = poolCfg ? poolCfg.filter((x) => x && typeof x === "object" && (x.health || x.scrub || x.size || x.name)).map((x) => this._manualPool(x)) : [];
     const rootDs = (s) => sen(s) && attr(s, "pool") && attr(s, "mountpoint") &&
       String(s.attributes.mountpoint).replace(/\/+$/, "") === "/mnt/" + s.attributes.pool;
-    let pools = pick((s) => ((bin(s) || sen(s)) && (attr(s, "scrub_state") || attr(s, "is_decrypted") || attr(s, "autotrim"))) || rootDs(s), c.pools);
+    let pools = pick((s) => ((bin(s) || sen(s)) && (attr(s, "scrub_state") || attr(s, "is_decrypted") || attr(s, "autotrim"))) || rootDs(s), poolIds);
     {
       // one entry per pool, preferring the health binary sensor
       const groups = new Map();
@@ -259,7 +262,7 @@ class TrueNASCard extends HTMLElement {
       arc: find("arc", /arc.*(size|cache)|arc_size/i),
       load: find("load", /load.*(short|1)|load_short|load_shortterm/i),
     };
-    return { pools, vms, apps, services, disks, system };
+    return { pools, manualPools, vms, apps, services, disks, system };
   }
 
   // ---------- rendering ----------
@@ -373,42 +376,79 @@ class TrueNASCard extends HTMLElement {
     const a = p.attributes;
     if (p.entity_id.startsWith("binary_sensor.")) return p.state === "on";
     if (a.healthy !== undefined) return a.healthy === true || a.healthy === "true";
-    return String(a.status || "ONLINE").toUpperCase() === "ONLINE";
+    if (a.status !== undefined) return String(a.status).toUpperCase() === "ONLINE";
+    if (/^(unknown|unavailable)$/i.test(p.state)) return null;
+    if (num(p.state) == null) return /^(online|healthy|on|true|ok|good)$/i.test(p.state);
+    return true;
+  }
+
+  _poolName(e) {
+    const a = e.attributes || {};
+    return String(a.pool || (a.friendly_name || e.entity_id).replace(/^(truenas|pools?|datasets?)\s+/i, "").replace(/\s*(health|healthy|free|usage|used|scrub.*)$/i, ""));
   }
 
   _poolItem(p) {
     const a = p.attributes;
-    const name = String(a.pool || (a.friendly_name || p.entity_id).replace(/^(truenas|pools?|datasets?)\s+/i, "").replace(/\s*health$/i, ""));
-    const healthy = this._poolHealthy(p);
+    const group = [p, ...(this._poolExtras.get(p.entity_id) || [])];
+    const caps = group.map((e) => this._capacity(e));
     const poolName = this._poolKey(p).replace(/-/g, "_");
-    const caps = [p, ...(this._poolExtras.get(p.entity_id) || [])].map((e) => this._capacity(e));
-    const auto = caps.some((x) => x.pct != null || (x.total != null && (x.used != null || x.free != null)))
-      ? null
-      : Object.values(this._hass.states).find(
-          (s) => s.entity_id.startsWith("sensor.") && s.entity_id !== p.entity_id &&
-            s.entity_id.toLowerCase().replace(/-/g, "_").includes(poolName) && !/health/i.test(s.entity_id) &&
-            !s.attributes.serial && this._capacity(s).ok
-        );
+    const has = caps.some((x) => x.ok);
+    const auto = has ? null : Object.values(this._hass.states).find(
+      (s) => s.entity_id.startsWith("sensor.") && s.entity_id !== p.entity_id &&
+        s.entity_id.toLowerCase().replace(/-/g, "_").includes(poolName) && !/health/i.test(s.entity_id) &&
+        !s.attributes.serial && this._capacity(s).ok
+    );
     if (auto) caps.push(this._capacity(auto));
+    const healthy = this._poolHealthy(p);
+    const status = group.map((e) => e.attributes.status).find(Boolean) || (p.entity_id.startsWith("binary_sensor.") ? (healthy ? "ONLINE" : "UNHEALTHY") : "");
+    const scrub = group.map((e) => e.attributes.scrub_state).find(Boolean);
+    return this._poolRow({ id: p.entity_id, name: this._poolName(p), healthy, status, scrub, caps });
+  }
+
+  // A pool configured in the editor: { name, health, scrub, size } (each an entity id, all optional)
+  _manualPool(cfg) {
+    const get = (id) => (id ? this._hass.states[id] : null);
+    const h = get(cfg.health), sc = get(cfg.scrub), sz = get(cfg.size);
+    const ents = [h, sc, sz].filter(Boolean);
+    const isBin = h && h.entity_id.startsWith("binary_sensor.");
+    const healthy = h ? this._poolHealthy(h) : null;
+    let status = "";
+    if (h) status = h.attributes.status || (isBin ? (healthy ? "ONLINE" : "UNHEALTHY") : num(h.state) == null ? h.state : "");
+    let scrub = sc ? (sc.attributes.scrub_state ?? sc.state) : h && h.attributes.scrub_state;
+    const caps = sz ? [this._capacity(sz)] : h ? [this._capacity(h)] : [];
+    return {
+      caps,
+      ents,
+      healthy,
+      id: (h || sz || sc || {}).entity_id || "",
+      name: cfg.name || (ents[0] ? this._poolName(ents[0]) : "Pool"),
+      status,
+      scrub,
+    };
+  }
+
+  _manualPoolItem(m) {
+    return this._poolRow({ id: m.id, name: m.name, healthy: m.healthy, status: m.status, scrub: m.scrub, caps: m.caps || [] });
+  }
+
+  _poolRow({ id, name, healthy, status, scrub, caps }) {
     const pick = (k) => caps.map((x) => x[k]).find((v) => v != null);
-    const status = a.status || [p, ...(this._poolExtras.get(p.entity_id) || [])].map((e) => e.attributes.status).find(Boolean);
-    const sub = ["Pool", status || (p.entity_id.startsWith("binary_sensor.") ? (healthy ? "ONLINE" : "UNHEALTHY") : "")].filter(Boolean);
-    if (a.scrub_state && a.scrub_state !== "NONE") sub.push("scrub " + String(a.scrub_state).toLowerCase());
+    const sub = ["Pool"];
+    if (status && !/^(unknown|unavailable)$/i.test(status)) sub.push(status);
+    if (scrub && !/^(none|unknown|unavailable)$/i.test(scrub)) sub.push("scrub " + String(scrub).toLowerCase());
     let bars = "", pct = 0;
-    {
-      const total = pick("total");
-      const free = pick("free");
-      const used = pick("used") ?? (total != null && free != null ? total - free : null);
-      const p2 = pick("pct") ?? (total && used != null ? (used / total) * 100 : null);
-      if (p2 != null) {
-        pct = p2;
-        bars = this._metric("Used", pct, pct.toFixed(0) + "%");
-        if (total && used != null) sub.push(`${fmtBytes(used)} of ${fmtBytes(total)}`);
-        else if (free != null) sub.push(fmtBytes(free) + " free");
-      } else if (free != null) sub.push(fmtBytes(free) + " free");
-    }
-    const tone = !healthy ? "bad" : pct >= this._config.crit_pct ? "bad" : pct >= this._config.warn_pct ? "warn" : "ok";
-    return this._item({ id: p.entity_id, icon: "mdi:database", tone, name, sub: sub.join(" · "), bars });
+    const total = pick("total"), free = pick("free");
+    const used = pick("used") ?? (total != null && free != null ? total - free : null);
+    const p2 = pick("pct") ?? (total && used != null ? (used / total) * 100 : null);
+    if (p2 != null) {
+      pct = p2;
+      bars = this._metric("Used", pct, pct.toFixed(0) + "%");
+      if (total && used != null) sub.push(`${fmtBytes(used)} of ${fmtBytes(total)}`);
+      else if (free != null) sub.push(fmtBytes(free) + " free");
+    } else if (free != null) sub.push(fmtBytes(free) + " free");
+    const c = this._config;
+    const tone = healthy === false ? "bad" : pct >= c.crit_pct ? "bad" : pct >= c.warn_pct ? "warn" : "ok";
+    return this._item({ id, icon: "mdi:database", tone, name, sub: sub.join(" · "), bars });
   }
 
   _diskItem(d) {
@@ -489,7 +529,7 @@ class TrueNASCard extends HTMLElement {
     const c = this._config;
     const d = this._discover();
 
-    const ids = [...d.pools, ...d.vms, ...d.apps, ...d.disks, ...d.services, ...Object.values(d.system).filter(Boolean)];
+    const ids = [...d.pools, ...d.manualPools.flatMap((m) => m.ents), ...d.vms, ...d.apps, ...d.disks, ...d.services, ...Object.values(d.system).filter(Boolean)];
     const capSig = Object.values(this._hass.states)
       .filter((s) => s.entity_id.startsWith("sensor.") && /free|total|used/i.test(s.entity_id) && s.entity_id.toLowerCase().includes((c.prefix || "").toLowerCase()))
       .map((s) => s.state).join(",");
@@ -499,7 +539,7 @@ class TrueNASCard extends HTMLElement {
 
     const isOn = (e) => e.state === "on";
     const updCount = d.apps.filter((a) => a.attributes.update_available === true || a.attributes.update_available === "true").length;
-    const badPools = d.pools.filter((p) => !this._poolHealthy(p)).length;
+    const badPools = d.pools.filter((p) => this._poolHealthy(p) === false).length + d.manualPools.filter((m) => m.healthy === false).length;
     const hotDisks = d.disks.filter((x) => (num(x.state) ?? 0) >= c.crit_temp).length;
 
     let tone = "ok", sub = "All healthy";
@@ -510,13 +550,13 @@ class TrueNASCard extends HTMLElement {
     if (tone === "ok" && stopped) sub = `${stopped} stopped`;
 
     const guests = [...d.apps, ...d.vms];
-    const pill = guests.length ? `${guests.filter(isOn).length} / ${guests.length} running` : `${d.pools.length} pool${d.pools.length === 1 ? "" : "s"}`;
+    const pill = guests.length ? `${guests.filter(isOn).length} / ${guests.length} running` : `${d.pools.length + d.manualPools.length} pool${d.pools.length + d.manualPools.length === 1 ? "" : "s"}`;
     const pillIcon = guests.length ? "mdi:server" : "mdi:database";
 
     let body = "";
     for (const key of c.sections) {
       if (key === "system") body += `<div class="block"><div class="stitle">System</div>${this._systemItem(d.system)}</div>`;
-      else if (key === "pools") body += `<div class="block"><div class="stitle">Pools</div>${d.pools.length ? d.pools.map((p) => this._poolItem(p)).join("") : `<div class="empty">No pools found. Set <code>pools:</code> to your pool entities in the card YAML.</div>`}</div>`;
+      else if (key === "pools") body += `<div class="block"><div class="stitle">Pools</div>${d.pools.length + d.manualPools.length ? d.pools.map((p) => this._poolItem(p)).join("") + d.manualPools.map((m) => this._manualPoolItem(m)).join("") : `<div class="empty">No pools found. Add them under Pools in the card editor.</div>`}</div>`;
       else if (key === "bays") body += this._bays(d.disks);
     }
     for (const key of c.sections) {
@@ -590,7 +630,6 @@ const LABELS = {
   crit_temp: "Disk critical temperature (°C)",
   warn_pct: "Usage warning (%)",
   crit_pct: "Usage critical (%)",
-  pools: "Pools (leave empty to auto-detect)",
   disks: "Disks (leave empty to auto-detect)",
   apps: "Apps (leave empty to auto-detect)",
   vms: "Virtual machines (leave empty to auto-detect)",
@@ -602,9 +641,21 @@ const LABELS = {
   arc: "ARC size sensor",
 };
 
+const POOL_SCHEMA = [
+  { name: "name", selector: { text: {} } },
+  { name: "health", selector: { entity: {} } },
+  { name: "scrub", selector: { entity: {} } },
+  { name: "size", selector: { entity: {} } },
+];
+const POOL_LABELS = {
+  name: "Pool name",
+  health: "Health entity (on / ONLINE = healthy)",
+  scrub: "Scrub status entity",
+  size: "Size / usage entity",
+};
+
 const EDITOR_SCHEMA = [
   { name: "title", selector: { text: {} } },
-  { name: "pools", selector: { entity: { multiple: true, domain: ["sensor", "binary_sensor"] } } },
   { name: "disks", selector: { entity: { multiple: true, domain: "sensor" } } },
   { name: "apps", selector: { entity: { multiple: true, domain: ["binary_sensor", "switch"] } } },
   { name: "vms", selector: { entity: { multiple: true, domain: ["binary_sensor", "switch"] } } },
@@ -673,6 +724,31 @@ class TrueNASCardEditor extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (this._form) this._form.hass = hass;
+    (this._poolForms || []).forEach((f) => (f.hass = hass));
+  }
+
+  // pools in object form; plain entity ids from older configs are converted
+  _poolsList() {
+    const p = Array.isArray(this._config.pools) ? this._config.pools : [];
+    return p.map((x) =>
+      typeof x === "string" ? (x.startsWith("binary_sensor.") ? { health: x } : { health: x, size: x }) : { ...x }
+    );
+  }
+
+  _emit(cfg) {
+    cfg.type = this._config.type || "custom:truenas-card";
+    this._config = cfg;
+    this.dispatchEvent(new CustomEvent("config-changed", { bubbles: true, composed: true, detail: { config: cfg } }));
+  }
+
+  _setPools(list) {
+    const out = { ...this._config };
+    const clean = list
+      .map((p) => Object.fromEntries(Object.entries(p).filter(([, v]) => v !== undefined && v !== null && v !== "")))
+      .filter((p, i, arr) => Object.keys(p).length || i < arr.length); // keep blank rows the user just added
+    if (clean.length) out.pools = clean;
+    else delete out.pools;
+    this._emit(out);
   }
 
   _render() {
@@ -681,11 +757,29 @@ class TrueNASCardEditor extends HTMLElement {
         this.textContent = "The form component could not be loaded. Edit this card in YAML, or refresh the page and try again.";
         return;
       }
+      const style = document.createElement("style");
+      style.textContent = `
+        .tn-pools { margin:16px 0 8px; }
+        .tn-pools h3 { font-size:1em; font-weight:500; margin:0 0 4px; }
+        .tn-pools .hint { font-size:.85em; opacity:.7; margin-bottom:8px; }
+        .tn-pool { border:1px solid var(--divider-color,#ccc); border-radius:12px; padding:12px; margin-bottom:10px; }
+        .tn-pool .bar { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-weight:500; }
+        .tn-btn { font:inherit; cursor:pointer; border:none; border-radius:18px; padding:6px 14px;
+          background:var(--primary-color,#03a9f4); color:var(--text-primary-color,#fff); }
+        .tn-btn.rm { background:none; color:var(--error-color,#db4437); padding:4px 8px; }
+      `;
+      this.appendChild(style);
+
       this._form = document.createElement("ha-form");
       this._form.computeLabel = (s) => LABELS[s.name] || s.name;
       this._form.schema = EDITOR_SCHEMA;
       this._form.addEventListener("value-changed", (ev) => this._changed(ev.detail.value));
+
+      this._poolsEl = document.createElement("div");
+      this._poolsEl.className = "tn-pools";
+      this.appendChild(this._poolsEl);
       this.appendChild(this._form);
+
       const note = document.createElement("div");
       note.style.cssText = "margin-top:12px;font-size:.85em;opacity:.7";
       note.textContent = "Pin disks to exact bays with bay_slots in YAML.";
@@ -693,19 +787,73 @@ class TrueNASCardEditor extends HTMLElement {
     }
     if (this._hass) this._form.hass = this._hass;
     this._form.data = { ...DEFAULTS, ...this._config };
+    this._renderPools();
+  }
+
+  _renderPools() {
+    const list = this._poolsList();
+    // only rebuild when the number of pools changes, so typing doesn't lose focus
+    if (this._poolForms && this._poolForms.length === list.length) {
+      this._poolForms.forEach((f, i) => (f.data = list[i]));
+      return;
+    }
+    const el = this._poolsEl;
+    el.innerHTML = `<h3>Pools</h3><div class="hint">Leave empty to auto-detect. Add a pool to choose its health, scrub and size entities yourself.</div>`;
+    this._poolForms = list.map((p, i) => {
+      const box = document.createElement("div");
+      box.className = "tn-pool";
+      const bar = document.createElement("div");
+      bar.className = "bar";
+      bar.innerHTML = `<span>Pool ${i + 1}</span>`;
+      const rm = document.createElement("button");
+      rm.className = "tn-btn rm";
+      rm.textContent = "Remove";
+      rm.addEventListener("click", () => {
+        const l = this._poolsList();
+        l.splice(i, 1);
+        this._poolForms = null;
+        this._setPools(l);
+        this._renderPools();
+      });
+      bar.appendChild(rm);
+      const f = document.createElement("ha-form");
+      f.schema = POOL_SCHEMA;
+      f.computeLabel = (s) => POOL_LABELS[s.name] || s.name;
+      if (this._hass) f.hass = this._hass;
+      f.data = p;
+      f.addEventListener("value-changed", (ev) => {
+        ev.stopPropagation();
+        const l = this._poolsList();
+        l[i] = ev.detail.value;
+        this._setPools(l);
+      });
+      box.append(bar, f);
+      el.appendChild(box);
+      return f;
+    });
+    const add = document.createElement("button");
+    add.className = "tn-btn";
+    add.textContent = "+ Add pool";
+    add.addEventListener("click", () => {
+      const l = this._poolsList();
+      l.push({});
+      this._poolForms = null;
+      this._setPools(l);
+      this._renderPools();
+    });
+    el.appendChild(add);
   }
 
   _changed(value) {
     const out = { ...this._config };
     for (const [k, v] of Object.entries(value || {})) {
+      if (k === "pools") continue; // managed by the pool editor
       const empty = v === undefined || v === null || v === "" || (Array.isArray(v) && !v.length && k !== "expand" && k !== "sections");
       const isDefault = k in DEFAULTS && JSON.stringify(DEFAULTS[k]) === JSON.stringify(v);
       if (empty || isDefault) delete out[k];
       else out[k] = v;
     }
-    out.type = this._config.type || "custom:truenas-card";
-    this._config = out;
-    this.dispatchEvent(new CustomEvent("config-changed", { bubbles: true, composed: true, detail: { config: out } }));
+    this._emit(out);
   }
 }
 

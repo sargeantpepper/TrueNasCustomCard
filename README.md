@@ -38,7 +38,11 @@ cpu_temp: sensor.truenas_cpu_temperature
 uptime: sensor.truenas_uptime
 load: sensor.truenas_load_average_short
 arc: sensor.truenas_arc_size
-pools: [binary_sensor.truenas_tank_health]
+pools:                       # or set these per pool in the editor
+  - name: NAS_Storage
+    health: binary_sensor.truenas_nas_storage_health
+    scrub: binary_sensor.truenas_nas_storage_health  # uses its scrub_state attribute, else its state
+    size: sensor.datasets_nas_storage
 disks: [sensor.truenas_sda_temperature]
 apps: []
 vms: []
