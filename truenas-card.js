@@ -284,7 +284,7 @@ class TrueNASCard extends HTMLElement {
   _systemItem(s, upd) {
     const parts = [];
     const up = s.uptime && fmtUp(s.uptime.state);
-    if (up) parts.push("Up " + up);
+    if (up) parts.push("Uptime " + up);
     if (s.temp && num(s.temp.state) != null) parts.push(`${num(s.temp.state).toFixed(0)}°C`);
     const cpu = s.cpu && num(s.cpu.state), mem = s.mem && num(s.mem.state);
     let bars = "";
