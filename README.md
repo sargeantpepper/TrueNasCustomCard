@@ -12,6 +12,8 @@ A Home Assistant Lovelace card for the [tomaae TrueNAS integration](https://gith
 
 ## Usage
 
+The card has a visual editor: add **TrueNAS Card** from the card picker and use the form. YAML works too.
+
 ```yaml
 type: custom:truenas-card
 title: Nas
