@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.4.1";
+const CARD_VERSION = "2.4.2";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -417,8 +417,17 @@ class TrueNASCard extends HTMLElement {
     const healthy = h ? this._poolHealthy(h) : null;
     let status = "";
     if (h) status = h.attributes.status || (isBin ? (healthy ? "ONLINE" : "UNHEALTHY") : num(h.state) == null ? h.state : "");
-    let scrub = sc ? (sc.attributes.scrub_state ?? sc.state) : h && h.attributes.scrub_state;
-    const scrubEnd = (sc || h) && (sc || h).attributes.scrub_end;
+    // scrub text: a scrub attribute on the scrub entity, then on the health entity,
+    // then the scrub entity's own state (ignored if it is just on/off)
+    const sAttr = (e, re) => {
+      if (!e) return undefined;
+      const k = Object.keys(e.attributes || {}).find((x) => re.test(x));
+      return k ? e.attributes[k] : undefined;
+    };
+    const STATE_RE = /^scrub[ _]?(state|status)$/i, END_RE = /^scrub[ _]?(end|finished|last)/i;
+    let scrub = sAttr(sc, STATE_RE) ?? sAttr(h, STATE_RE);
+    if (scrub == null && sc && !/^(on|off|unknown|unavailable)$/i.test(sc.state)) scrub = sc.state;
+    const scrubEnd = sAttr(sc, END_RE) ?? sAttr(h, END_RE);
     const caps = sz ? [this._capacity(sz)] : h ? [this._capacity(h)] : [];
     return {
       caps,
