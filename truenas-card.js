@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.4.0";
+const CARD_VERSION = "2.4.1";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -384,7 +384,9 @@ class TrueNASCard extends HTMLElement {
 
   _poolName(e) {
     const a = e.attributes || {};
-    return String(a.pool || (a.friendly_name || e.entity_id).replace(/^(truenas|pools?|datasets?)\s+/i, "").replace(/\s*(health|healthy|free|usage|used|scrub.*)$/i, ""));
+    const p = a.path || a.mountpoint;
+    if (!a.pool && p) return String(p).split("/").filter(Boolean).pop();
+    return String(a.pool || (a.friendly_name || e.entity_id).replace(/^(truenas|system|pools?|datasets?)\s+/i, "").replace(/\s*(health|healthy|free|usage|used|scrub.*)$/i, ""));
   }
 
   _poolItem(p) {
@@ -402,7 +404,8 @@ class TrueNASCard extends HTMLElement {
     const healthy = this._poolHealthy(p);
     const status = group.map((e) => e.attributes.status).find(Boolean) || (p.entity_id.startsWith("binary_sensor.") ? (healthy ? "ONLINE" : "UNHEALTHY") : "");
     const scrub = group.map((e) => e.attributes.scrub_state).find(Boolean);
-    return this._poolRow({ id: p.entity_id, name: this._poolName(p), healthy, status, scrub, caps });
+    const scrubEnd = group.map((e) => e.attributes.scrub_end).find(Boolean);
+    return this._poolRow({ id: p.entity_id, name: this._poolName(p), healthy, status, scrub, scrubEnd, caps });
   }
 
   // A pool configured in the editor: { name, health, scrub, size } (each an entity id, all optional)
@@ -415,9 +418,11 @@ class TrueNASCard extends HTMLElement {
     let status = "";
     if (h) status = h.attributes.status || (isBin ? (healthy ? "ONLINE" : "UNHEALTHY") : num(h.state) == null ? h.state : "");
     let scrub = sc ? (sc.attributes.scrub_state ?? sc.state) : h && h.attributes.scrub_state;
+    const scrubEnd = (sc || h) && (sc || h).attributes.scrub_end;
     const caps = sz ? [this._capacity(sz)] : h ? [this._capacity(h)] : [];
     return {
       caps,
+      scrubEnd,
       ents,
       healthy,
       id: (h || sz || sc || {}).entity_id || "",
@@ -428,14 +433,19 @@ class TrueNASCard extends HTMLElement {
   }
 
   _manualPoolItem(m) {
-    return this._poolRow({ id: m.id, name: m.name, healthy: m.healthy, status: m.status, scrub: m.scrub, caps: m.caps || [] });
+    return this._poolRow({ id: m.id, name: m.name, healthy: m.healthy, status: m.status, scrub: m.scrub, scrubEnd: m.scrubEnd, caps: m.caps || [] });
   }
 
-  _poolRow({ id, name, healthy, status, scrub, caps }) {
+  _poolRow({ id, name, healthy, status, scrub, scrubEnd, caps }) {
     const pick = (k) => caps.map((x) => x[k]).find((v) => v != null);
     const sub = ["Pool"];
     if (status && !/^(unknown|unavailable)$/i.test(status)) sub.push(status);
-    if (scrub && !/^(none|unknown|unavailable)$/i.test(scrub)) sub.push("scrub " + String(scrub).toLowerCase());
+    if (scrub && !/^(none|unknown|unavailable)$/i.test(scrub)) {
+      let t = "scrub " + String(scrub).toLowerCase();
+      const d = scrubEnd && new Date(scrubEnd);
+      if (d && !isNaN(d) && /finished/i.test(scrub)) t += " " + d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+      sub.push(t);
+    }
     let bars = "", pct = 0;
     const total = pick("total"), free = pick("free");
     const used = pick("used") ?? (total != null && free != null ? total - free : null);
