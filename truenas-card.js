@@ -6,12 +6,12 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.4.2";
+const CARD_VERSION = "2.5.0";
 
 const DEFAULTS = {
   title: "TrueNAS",
   prefix: "truenas", // biases discovery; useful with several systems
-  sections: ["system", "pools", "bays", "disks", "apps", "vms"], // add "services" if wanted
+  sections: ["system", "pools", "disks", "apps", "vms"], // add "services" if wanted; "disks" = drive bays
   expand: [], // collapsible groups (disks, apps, vms, services) that start open
   bay_columns: null, // drive-bay grid columns (auto if unset)
   bay_count: null, // total physical slots, so empty bays show (auto if unset)
@@ -77,7 +77,7 @@ const STYLE = `
   .chips { display:flex; flex-wrap:wrap; gap:8px; padding:4px 0 0 54px; }
   .chip { font-size:.85em; padding:4px 10px; border-radius:12px; background:var(--secondary-background-color,rgba(127,127,127,.15)); color:var(--secondary-text-color); }
   .chip b { color:var(--primary-text-color); font-weight:600; }
-  .bays-wrap { margin:16px 0 4px; }
+  .bays-wrap { margin:8px 0 4px; }
   .bays-title { font-size:.8em; letter-spacing:.06em; text-transform:uppercase; color:var(--secondary-text-color); margin:0 4px 8px; }
   .chassis { display:grid; grid-template-columns:repeat(var(--cols),1fr); gap:8px; padding:10px; border-radius:16px;
     background:var(--secondary-background-color,rgba(127,127,127,.15)); box-shadow:inset 0 0 0 1px var(--divider-color,rgba(127,127,127,.25)); }
@@ -171,6 +171,9 @@ class TrueNASCard extends HTMLElement {
   setConfig(config) {
     if (!config) throw new Error("Invalid configuration");
     this._config = { ...DEFAULTS, ...config };
+    const norm = (l) => (Array.isArray(l) ? [...new Set(l.map((k) => (k === "bays" ? "disks" : k)))] : l);
+    this._config.sections = norm(this._config.sections);
+    this._config.expand = norm(this._config.expand);
     if (this._open === null) this._open = new Set(this._config.expand);
     this._sig = "";
     if (this._hass) this._render();
@@ -470,19 +473,6 @@ class TrueNASCard extends HTMLElement {
     return this._item({ id, icon: "mdi:database", tone, name, sub: sub.join(" · "), bars });
   }
 
-  _diskItem(d) {
-    const a = d.attributes, t = num(d.state);
-    const tone = t == null ? "off" : this._tempTone(t);
-    const name = diskName(d);
-    const sub = [this._kind(d) || "Disk", cleanModel(a.model), fmtDrive(a.size), a.rotationrate > 0 ? a.rotationrate + " rpm" : "", a.serial].filter(Boolean).join(" · ");
-    let bars = "";
-    if (t != null) {
-      const p = (t / (this._config.crit_temp + 15)) * 100;
-      bars = `<div class="m"><span>Temp</span><div class="bar"><i class="${tone === "ok" ? "" : tone}" style="width:${Math.min(100, p).toFixed(0)}%"></i></div><span class="mv">${t.toFixed(0)}°C</span></div>`;
-    }
-    return this._item({ id: d.entity_id, icon: "mdi:harddisk", tone, name, sub, bars });
-  }
-
   _runItem(kind, e, icon, extra) {
     const un = e.state === "unavailable" || e.state === "unknown";
     const on = e.state === "on";
@@ -539,7 +529,7 @@ class TrueNASCard extends HTMLElement {
         <div class="tray"><span class="led"></span><span class="no">${i + 1}</span><span class="tt">${t == null ? "–" : t.toFixed(0) + "°"}</span><span class="hd"></span></div>
         <div class="bn">${esc(name)}${this._kind(d) ? " · " + esc(this._kind(d)) : ""}</div>${a.size ? `<div class="bn bs">${esc(fmtDrive(a.size))}</div>` : ""}</div>`;
     });
-    return `<div class="bays-wrap"><div class="bays-title">Drive bays</div>
+    return `<div class="bays-wrap">
       <div class="chassis ${c.bay_vertical ? "vert" : ""}" style="--cols:${cols}">${cells.join("")}</div></div>`;
   }
 
@@ -576,13 +566,14 @@ class TrueNASCard extends HTMLElement {
     for (const key of c.sections) {
       if (key === "system") body += `<div class="block"><div class="stitle">System</div>${this._systemItem(d.system)}</div>`;
       else if (key === "pools") body += `<div class="block"><div class="stitle">Pools</div>${d.pools.length + d.manualPools.length ? d.pools.map((p) => this._poolItem(p)).join("") + d.manualPools.map((m) => this._manualPoolItem(m)).join("") : `<div class="empty">No pools found. Add them under Pools in the card editor.</div>`}</div>`;
-      else if (key === "bays") body += this._bays(d.disks);
     }
     for (const key of c.sections) {
       if (key === "disks") {
-        const disks = [...d.disks].sort((a, b) => a.entity_id.localeCompare(b.entity_id));
+        const disks = d.disks;
         const t = hotDisks ? "bad" : disks.some((x) => (num(x.state) ?? 0) >= c.warn_temp) ? "warn" : disks.length ? "ok" : "off";
-        body += this._group(key, t, `Disks · ${disks.length} ${disks.length === 1 ? "drive" : "drives"}`, disks.map((x) => this._diskItem(x)).join(""));
+        const hot = disks.length ? Math.max(...disks.map((x) => num(x.state) ?? -Infinity)) : null;
+        const label = `Disks · ${disks.length} ${disks.length === 1 ? "drive" : "drives"}` + (Number.isFinite(hot) ? ` · max ${hot.toFixed(0)}°C` : "");
+        body += this._group(key, t, label, disks.length || c.bay_count || Array.isArray(c.bay_slots) ? this._bays(disks) : "");
       } else if (key === "apps") {
         const run = d.apps.filter(isOn).length;
         const t = !d.apps.length ? "off" : updCount ? "warn" : run === d.apps.length ? "ok" : "off";
@@ -687,8 +678,7 @@ const EDITOR_SCHEMA = [
         options: [
           { value: "system", label: "System" },
           { value: "pools", label: "Pools" },
-          { value: "bays", label: "Drive bays" },
-          { value: "disks", label: "Disks list" },
+          { value: "disks", label: "Disks (drive bays)" },
           { value: "apps", label: "Apps" },
           { value: "vms", label: "Virtual machines" },
           { value: "services", label: "Services" },
@@ -703,7 +693,7 @@ const EDITOR_SCHEMA = [
         multiple: true,
         mode: "list",
         options: [
-          { value: "disks", label: "Disks list" },
+          { value: "disks", label: "Disks (drive bays)" },
           { value: "apps", label: "Apps" },
           { value: "vms", label: "Virtual machines" },
           { value: "services", label: "Services" },
@@ -805,7 +795,8 @@ class TrueNASCardEditor extends HTMLElement {
       this.appendChild(note);
     }
     if (this._hass) this._form.hass = this._hass;
-    this._form.data = { ...DEFAULTS, ...this._config };
+    const norm = (l) => (Array.isArray(l) ? [...new Set(l.map((k) => (k === "bays" ? "disks" : k)))] : l);
+    this._form.data = { ...DEFAULTS, ...this._config, sections: norm(this._config.sections ?? DEFAULTS.sections), expand: norm(this._config.expand ?? DEFAULTS.expand) };
     this._renderPools();
   }
 

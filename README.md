@@ -25,8 +25,13 @@ Entities are auto-discovered from the attributes the integration exposes. Everyt
 type: custom:truenas-card
 title: Nas
 prefix: truenas              # biases discovery; useful with several TrueNAS systems
-sections: [system, pools, disks, apps, vms, services]
-collapse: [disks]            # sections that start collapsed
+sections: [system, pools, disks, apps, vms, services]   # disks = collapsible drive-bay panel
+expand: [disks]              # panels that start open (disks, apps, vms, services)
+bay_count: 8                 # total physical bays, so empty slots show
+bay_columns: 4               # bays per row (default 4)
+bay_slots:                   # optional: pin disks to physical slots, "" = empty
+  - sensor.disks_sda
+  - ""
 warn_temp: 45
 crit_temp: 55
 warn_pct: 80                 # pool usage thresholds
