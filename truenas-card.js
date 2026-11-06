@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.9.1";
+const CARD_VERSION = "2.10.0";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -19,6 +19,9 @@ const DEFAULTS = {
   bay_vertical: true, // tall trays (default); set false for wide trays
   controls: true, // start/stop buttons on apps, VMs and services
   scrutiny: true, // use SMART data from the Scrutiny integration when found
+  background_opacity: 100, // card background opacity, 0–100 %
+  glass_background: false, // frosted-glass blur behind a see-through background
+  card_background: "", // optional background colour (any CSS colour); defaults to the theme's card colour
   warn_temp: 45,
   crit_temp: 55,
   warn_pct: 80,
@@ -662,6 +665,17 @@ class TrueNASCard extends HTMLElement {
       <div class="chassis ${c.bay_vertical ? "vert" : ""}" style="--cols:${cols}">${cells.join("")}</div></div>`;
   }
 
+  _bgStyle() {
+    const c = this._config;
+    const op = Math.max(0, Math.min(100, Number(c.background_opacity ?? 100)));
+    const base = c.card_background || "var(--ha-card-background, var(--card-background-color, #fff))";
+    const parts = [];
+    if (op < 100 || c.card_background) parts.push(`background:color-mix(in srgb, ${base} ${op}%, transparent)`);
+    if (c.glass_background) parts.push("backdrop-filter:blur(16px) saturate(1.4)", "-webkit-backdrop-filter:blur(16px) saturate(1.4)");
+    if (op < 100) parts.push("box-shadow:none");
+    return esc(parts.join(";"));
+  }
+
   _render() {
     if (!this._hass || !this._config) return;
     const c = this._config;
@@ -724,7 +738,7 @@ class TrueNASCard extends HTMLElement {
     }
 
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
-      <ha-card>
+      <ha-card style="${this._bgStyle()}">
         <div class="head t-${tone}">
           <div class="badge"><ha-icon icon="${tone === "ok" ? "mdi:check-circle-outline" : "mdi:alert-circle-outline"}"></ha-icon></div>
           <div class="ht"><div class="title">${esc(c.title)}</div><div class="sub">${esc(sub)}</div></div>
@@ -766,6 +780,9 @@ const LABELS = {
   expand: "Panels that start open",
   controls: "Show start / stop buttons",
   scrutiny: "Use Scrutiny SMART data (if installed)",
+  background_opacity: "Background opacity",
+  glass_background: "Frosted glass background",
+  card_background: "Background colour (optional, e.g. #1c1c1c or rgb(0,0,0))",
   bay_vertical: "Tall drive trays",
   bay_columns: "Bays per row (blank = auto)",
   bay_count: "Total physical bays (blank = auto)",
@@ -817,6 +834,9 @@ const EDITOR_SCHEMA = [
   },
   { name: "controls", selector: { boolean: {} } },
   { name: "scrutiny", selector: { boolean: {} } },
+  { name: "background_opacity", selector: { number: { min: 0, max: 100, step: 5, mode: "slider", unit_of_measurement: "%" } } },
+  { name: "glass_background", selector: { boolean: {} } },
+  { name: "card_background", selector: { text: {} } },
   { name: "bay_vertical", selector: { boolean: {} } },
   {
     type: "grid",
