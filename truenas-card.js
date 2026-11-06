@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.10.0";
+const CARD_VERSION = "2.10.1";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -34,13 +34,14 @@ const GROUP_ICON = { disks: "mdi:harddisk", apps: "mdi:docker", vms: "mdi:monito
 const STYLE = `
   :host { display:block; }
   ha-card { display:block; box-sizing:border-box; padding:16px; overflow:hidden; font-size:.9em; --tn-ring:#fff; }
-  .t-ok { --tone:var(--success-color,#43a047); } .t-warn { --tone:var(--warning-color,#ffa600); }
+  :host { --tn-green-text:color-mix(in srgb, var(--success-color,#43a047) 55%, #fff); }
+  .t-ok { --tone:var(--success-color,#43a047); --tone-text:var(--tn-green-text); } .t-warn { --tone:var(--warning-color,#ffa600); }
   .t-bad { --tone:var(--error-color,#db4437); } .t-off { --tone:var(--disabled-color,#9e9e9e); }
-  .tint { background:color-mix(in srgb, var(--tone) 18%, transparent); color:var(--tone); }
+  .tint { background:color-mix(in srgb, var(--tone) 18%, transparent); color:var(--tone-text, var(--tone)); }
 
   .head { display:flex; align-items:center; gap:16px; margin-bottom:8px; }
   .badge { width:44px; height:44px; border-radius:14px; display:flex; align-items:center; justify-content:center; flex:none;
-    background:var(--secondary-background-color,rgba(127,127,127,.18)); color:var(--tone); --mdc-icon-size:24px; }
+    background:var(--secondary-background-color,rgba(127,127,127,.18)); color:var(--tone-text, var(--tone)); --mdc-icon-size:24px; }
   .head .ht { flex:1; min-width:0; }
   .head .title { font-size:1.35em; font-weight:700; line-height:1.2; color:var(--primary-text-color); }
   .head .sub { color:var(--secondary-text-color); font-size:1em; }
@@ -104,7 +105,7 @@ const STYLE = `
   .bay.empty .led, .bay.empty .hd { display:none; }
   .bay .bn.bs { margin-top:-3px; opacity:.8; }
   .bay .sm { text-align:center; font-size:.72em; font-weight:600; color:var(--tone); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .bay .sm.ok { color:var(--success-color,#43a047); } .bay .sm.warn { color:var(--warning-color,#ffa600); }
+  .bay .sm.ok { color:var(--tn-green-text); } .bay .sm.warn { color:var(--warning-color,#ffa600); }
   .bay .sm.bad { color:var(--error-color,#db4437); } .bay .sm.off { color:var(--secondary-text-color); }
   .tray .flag { position:absolute; left:50%; bottom:16px; transform:translateX(-50%); font-weight:700; font-size:.9em; color:var(--tone); }
   .bay .bn { text-align:center; font-size:.78em; color:var(--secondary-text-color); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -922,7 +923,7 @@ class TrueNASCardEditor extends HTMLElement {
         .tn-disk .dn small { opacity:.6; margin-left:6px; }
         .tn-disk .db { padding:0 12px 12px; }
         .tn-disk.closed .db { display:none; }
-        .tn-disk .sm-ok { color:var(--success-color,#43a047); } .tn-disk .sm-no { color:var(--warning-color,#ffa600); }
+        .tn-disk .sm-ok { color:color-mix(in srgb, var(--success-color,#43a047) 55%, #fff); } .tn-disk .sm-no { color:var(--warning-color,#ffa600); }
         .tn-pools h3 { font-size:1em; font-weight:500; margin:0 0 4px; }
         .tn-pools .hint { font-size:.85em; opacity:.7; margin-bottom:8px; }
         .tn-pool { border:1px solid var(--divider-color,#ccc); border-radius:12px; padding:12px; margin-bottom:10px; }
