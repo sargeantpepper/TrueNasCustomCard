@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.8.0";
+const CARD_VERSION = "2.8.1";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -146,6 +146,29 @@ const fmtUp = (v) => {
   return days ? `${days}d ${h}h` : `${h}h ${Math.floor((secs % 3600) / 60)}m`;
 };
 
+// The TrueNAS integration names attributes like "Serial", "Scrub state", "Available GiB".
+// Add snake_case aliases (serial, scrub_state, available_gib) so the card can read them either way.
+const _normCache = new WeakMap();
+const normState = (s) => {
+  if (!s || typeof s !== "object") return s;
+  let n = _normCache.get(s);
+  if (n) return n;
+  const a = s.attributes || {};
+  let na = null;
+  for (const k of Object.keys(a)) {
+    const nk = k.toLowerCase().replace(/[\s-]+/g, "_");
+    if (nk !== k && !(nk in a)) (na || (na = { ...a }))[nk] = a[k];
+  }
+  n = na ? { ...s, attributes: na } : s;
+  _normCache.set(s, n);
+  return n;
+};
+const normStates = (states) => {
+  const out = {};
+  for (const k in states) out[k] = normState(states[k]);
+  return out;
+};
+
 class TrueNASCard extends HTMLElement {
   constructor() {
     super();
@@ -186,6 +209,7 @@ class TrueNASCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    this._st = normStates(hass.states);
     this._render();
   }
 
@@ -197,7 +221,7 @@ class TrueNASCard extends HTMLElement {
 
   _entities() {
     const prefix = String(this._config.prefix || "").toLowerCase();
-    const all = Object.values(this._hass.states);
+    const all = Object.values(this._st);
     const mine = prefix
       ? all.filter((s) => s.entity_id.toLowerCase().includes(prefix) || String(s.attributes.friendly_name || "").toLowerCase().includes(prefix))
       : all;
@@ -205,7 +229,7 @@ class TrueNASCard extends HTMLElement {
   }
 
   _byIds(ids) {
-    return ids.map((id) => this._hass.states[id]).filter(Boolean);
+    return ids.map((id) => this._st[id]).filter(Boolean);
   }
 
   _discover() {
@@ -258,7 +282,7 @@ class TrueNASCard extends HTMLElement {
 
     // System sensors: explicit override > name regex among prefixed entities.
     const find = (key, re, extra) => {
-      if (c[key]) return this._hass.states[c[key]];
+      if (c[key]) return this._st[c[key]];
       const test = (s) => sen(s) && re.test(s.entity_id + " " + (s.attributes.friendly_name || "")) && (!extra || extra(s));
       return mine.find(test) || all.find(test);
     };
@@ -403,7 +427,7 @@ class TrueNASCard extends HTMLElement {
     const caps = group.map((e) => this._capacity(e));
     const poolName = this._poolKey(p).replace(/-/g, "_");
     const has = caps.some((x) => x.ok);
-    const auto = has ? null : Object.values(this._hass.states).find(
+    const auto = has ? null : Object.values(this._st).find(
       (s) => s.entity_id.startsWith("sensor.") && s.entity_id !== p.entity_id &&
         s.entity_id.toLowerCase().replace(/-/g, "_").includes(poolName) && !/health/i.test(s.entity_id) &&
         !s.attributes.serial && this._capacity(s).ok
@@ -418,7 +442,7 @@ class TrueNASCard extends HTMLElement {
 
   // A pool configured in the editor: { name, health, scrub, size } (each an entity id, all optional)
   _manualPool(cfg) {
-    const get = (id) => (id ? this._hass.states[id] : null);
+    const get = (id) => (id ? this._st[id] : null);
     const h = get(cfg.health), sc = get(cfg.scrub), sz = get(cfg.size);
     const ents = [h, sc, sz].filter(Boolean);
     const isBin = h && h.entity_id.startsWith("binary_sensor.");
@@ -520,7 +544,7 @@ class TrueNASCard extends HTMLElement {
     const bySerial = new Map(), byDev = new Map();
     if (this._config.scrutiny === false) return { bySerial, byDev, ents: [] };
     const ents = [];
-    for (const s of Object.values(this._hass.states)) {
+    for (const s of Object.values(this._st)) {
       const a = s.attributes;
       if (!s.entity_id.startsWith("sensor.") || a.serial_number === undefined) continue;
       ents.push(s);
@@ -545,7 +569,9 @@ class TrueNASCard extends HTMLElement {
     const sc = this._scr;
     if (!sc || !sc.bySerial.size) return null;
     const a = d.attributes;
-    return (a.serial && sc.bySerial.get(sc.norm(a.serial))) || sc.byDev.get(diskName(d).toLowerCase()) || null;
+    const dev = diskName(d).toLowerCase();
+    return (a.serial && sc.bySerial.get(sc.norm(a.serial))) || sc.byDev.get(dev) || sc.byDev.get(dev.replace(/n\d+$/, "")) ||
+      [...sc.byDev.entries()].find(([k]) => k.replace(/n\d+$/, "") === dev.replace(/n\d+$/, ""))?.[1] || null;
   }
 
   // "ok" | "warn" | "bad" | "off" plus a short label
@@ -589,7 +615,7 @@ class TrueNASCard extends HTMLElement {
     const c = this._config;
     const sorted = [...disks].sort((a, b) => a.entity_id.localeCompare(b.entity_id, undefined, { numeric: true }));
     let slots;
-    const byId = (id) => (id ? this._hass.states[id] || null : null);
+    const byId = (id) => (id ? this._st[id] || null : null);
     if (Array.isArray(c.bay_slots)) slots = c.bay_slots.map(byId);
     else if (Array.isArray(c.disks) && c.disks.some(Boolean)) slots = c.disks.map(byId); // editor order, "" = empty bay
     else slots = sorted;
@@ -623,7 +649,7 @@ class TrueNASCard extends HTMLElement {
     const d = this._discover();
 
     const ids = [...d.pools, ...d.manualPools.flatMap((m) => m.ents), ...d.vms, ...d.apps, ...d.disks, ...d.services, ...Object.values(d.system).filter(Boolean)];
-    const capSig = Object.values(this._hass.states)
+    const capSig = Object.values(this._st)
       .filter((s) => s.entity_id.startsWith("sensor.") && /free|total|used/i.test(s.entity_id) && s.entity_id.toLowerCase().includes((c.prefix || "").toLowerCase()))
       .map((s) => s.state).join(",");
     this._scr = this._scrutinyData();
@@ -805,7 +831,7 @@ class TrueNASCardEditor extends HTMLElement {
     if (this._form) this._form.hass = hass;
     (this._poolForms || []).forEach((f) => (f.hass = hass));
     (this._diskForms || []).forEach((f) => f && (f.hass = hass));
-    this._autoDisks = Object.values(hass.states)
+    this._autoDisks = Object.values(normStates(hass.states))
       .filter((s) => s.entity_id.startsWith("sensor.") && s.attributes.device_class === "temperature" &&
         (s.attributes.serial || s.attributes.model || s.attributes.type || s.attributes.size) && !/cpu|motherboard|board/i.test(s.entity_id))
       .map((s) => s.entity_id)
