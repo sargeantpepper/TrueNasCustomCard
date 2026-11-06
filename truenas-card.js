@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.8.1";
+const CARD_VERSION = "2.9.0";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -202,6 +202,17 @@ class TrueNASCard extends HTMLElement {
     const norm = (l) => (Array.isArray(l) ? [...new Set(l.map((k) => (k === "bays" ? "disks" : k)))] : l);
     this._config.sections = norm(this._config.sections);
     this._config.expand = norm(this._config.expand);
+    // disks entries: "id" | "" | { entity, smart, name }
+    this._diskOverrides = new Map();
+    if (Array.isArray(this._config.disks)) {
+      this._diskIds = this._config.disks.map((x) => {
+        if (x && typeof x === "object") {
+          if (x.entity) this._diskOverrides.set(x.entity, x);
+          return x.entity || "";
+        }
+        return x || "";
+      });
+    } else this._diskIds = null;
     if (this._open === null) this._open = new Set(this._config.expand);
     this._sig = "";
     if (this._hass) this._render();
@@ -277,7 +288,7 @@ class TrueNASCard extends HTMLElement {
         s.attributes.device_class === "temperature" &&
         (attr(s, "serial") || attr(s, "model") || attr(s, "type") || attr(s, "rotational") || attr(s, "size")) &&
         !/cpu|motherboard|board/i.test(s.entity_id),
-      Array.isArray(c.disks) && c.disks.some(Boolean) ? c.disks.filter(Boolean) : null
+      this._diskIds && this._diskIds.some(Boolean) ? this._diskIds.filter(Boolean) : null
     );
 
     // System sensors: explicit override > name regex among prefixed entities.
@@ -542,7 +553,7 @@ class TrueNASCard extends HTMLElement {
   _scrutinyData() {
     const norm = (x) => String(x || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
     const bySerial = new Map(), byDev = new Map();
-    if (this._config.scrutiny === false) return { bySerial, byDev, ents: [] };
+    if (this._config.scrutiny === false) return { bySerial, byDev, ents: [], norm };
     const ents = [];
     for (const s of Object.values(this._st)) {
       const a = s.attributes;
@@ -567,6 +578,14 @@ class TrueNASCard extends HTMLElement {
 
   _smartFor(d) {
     const sc = this._scr;
+    const ov = this._diskOverrides && this._diskOverrides.get(d.entity_id);
+    if (ov && ov.smart && sc && this._config.scrutiny !== false) {
+      const e = this._st[ov.smart];
+      if (e) {
+        const viaSerial = e.attributes.serial_number !== undefined && sc.bySerial.get(sc.norm(e.attributes.serial_number));
+        return viaSerial || { status: e, ents: [e] };
+      }
+    }
     if (!sc || !sc.bySerial.size) return null;
     const a = d.attributes;
     const dev = diskName(d).toLowerCase();
@@ -617,7 +636,7 @@ class TrueNASCard extends HTMLElement {
     let slots;
     const byId = (id) => (id ? this._st[id] || null : null);
     if (Array.isArray(c.bay_slots)) slots = c.bay_slots.map(byId);
-    else if (Array.isArray(c.disks) && c.disks.some(Boolean)) slots = c.disks.map(byId); // editor order, "" = empty bay
+    else if (this._diskIds && this._diskIds.some(Boolean)) slots = this._diskIds.map(byId); // editor order, "" = empty bay
     else slots = sorted;
     const total = Math.max(c.bay_count || 0, slots.length, 1);
     const cols = c.bay_columns || (c.bay_vertical ? 4 : total <= 6 ? total : total <= 8 ? 4 : 6);
@@ -632,7 +651,7 @@ class TrueNASCard extends HTMLElement {
       // SMART failure / warning overrides a normal temperature colour
       if (sm && sm.tone === "bad") tone = "bad";
       else if (sm && sm.tone === "warn" && tone === "ok") tone = "warn";
-      const name = diskName(d);
+      const name = (this._diskOverrides.get(d.entity_id) || {}).name || diskName(d);
       const tip = [[name, this._kind(d), cleanModel(a.model), fmtDrive(a.size), a.rotationrate > 0 ? a.rotationrate + " rpm" : "", a.serial].filter(Boolean).join(" · "), this._smartTip(info)].filter(Boolean).join("\n");
       const flag = sm && (sm.tone === "bad" || sm.tone === "warn") ? `<span class="flag">${sm.tone === "bad" ? "✕" : "!"}</span>` : "";
       return `<div class="bay t-${tone}" data-e="${esc(d.entity_id)}" title="${esc(tip)}">
@@ -687,7 +706,7 @@ class TrueNASCard extends HTMLElement {
         const hot = disks.length ? Math.max(...disks.map((x) => num(x.state) ?? -Infinity)) : null;
         const label = `Disks · ${disks.length} ${disks.length === 1 ? "drive" : "drives"}` + (Number.isFinite(hot) ? ` · max ${hot.toFixed(0)}°C` : "") +
           (smartBad ? ` · ${smartBad} failing` : smartWarn ? ` · ${smartWarn} warning` : smart.length ? " · SMART OK" : "");
-        body += this._group(key, t, label, disks.length || c.bay_count || Array.isArray(c.bay_slots) || (Array.isArray(c.disks) && c.disks.length) ? this._bays(disks) : "");
+        body += this._group(key, t, label, disks.length || c.bay_count || Array.isArray(c.bay_slots) || (this._diskIds && this._diskIds.length) ? this._bays(disks) : "");
       } else if (key === "apps") {
         const run = d.apps.filter(isOn).length;
         const t = !d.apps.length ? "off" : updCount ? "warn" : run === d.apps.length ? "ok" : "off";
@@ -830,7 +849,7 @@ class TrueNASCardEditor extends HTMLElement {
     this._hass = hass;
     if (this._form) this._form.hass = hass;
     (this._poolForms || []).forEach((f) => (f.hass = hass));
-    (this._diskForms || []).forEach((f) => f && (f.hass = hass));
+    (this._diskRows || []).forEach((r) => r && r.form && (r.form.hass = hass));
     this._autoDisks = Object.values(normStates(hass.states))
       .filter((s) => s.entity_id.startsWith("sensor.") && s.attributes.device_class === "temperature" &&
         (s.attributes.serial || s.attributes.model || s.attributes.type || s.attributes.size) && !/cpu|motherboard|board/i.test(s.entity_id))
@@ -871,6 +890,19 @@ class TrueNASCardEditor extends HTMLElement {
       const style = document.createElement("style");
       style.textContent = `
         .tn-pools { margin:16px 0 8px; }
+        .tn-coll > .tn-ch { display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none; margin-bottom:4px; }
+        .tn-coll > .tn-ch h3 { margin:0; flex:1; }
+        .tn-coll > .tn-ch .chev { transition:transform .15s; opacity:.7; }
+        .tn-coll.closed > .tn-ch .chev { transform:rotate(-90deg); }
+        .tn-coll.closed > .tn-cb { display:none; }
+        .tn-coll .cnt { font-size:.85em; opacity:.6; }
+        .tn-disk { border:1px solid var(--divider-color,#ccc); border-radius:10px; margin-bottom:6px; }
+        .tn-disk .dh { display:flex; align-items:center; gap:8px; padding:4px 8px; }
+        .tn-disk .dn { flex:1; min-width:0; cursor:pointer; padding:8px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .tn-disk .dn small { opacity:.6; margin-left:6px; }
+        .tn-disk .db { padding:0 12px 12px; }
+        .tn-disk.closed .db { display:none; }
+        .tn-disk .sm-ok { color:var(--success-color,#43a047); } .tn-disk .sm-no { color:var(--warning-color,#ffa600); }
         .tn-pools h3 { font-size:1em; font-weight:500; margin:0 0 4px; }
         .tn-pools .hint { font-size:.85em; opacity:.7; margin-bottom:8px; }
         .tn-pool { border:1px solid var(--divider-color,#ccc); border-radius:12px; padding:12px; margin-bottom:10px; }
@@ -927,114 +959,182 @@ class TrueNASCardEditor extends HTMLElement {
     this._renderDisks();
   }
 
-  // Disks / bay order. Saved as `disks:` – a list of entity ids in bay order, "" = empty bay.
+  // Disks / bay order. Saved as `disks:` in bay order. Each entry is:
+  //   "sensor.disks_sda"                                   – just the disk
+  //   ""                                                   – an empty bay
+  //   { entity, smart?, name? }                            – disk with a Scrutiny status entity and/or a display name
+  _diskEntries() {
+    const raw = Array.isArray(this._config.disks) ? this._config.disks : Array.isArray(this._config.bay_slots) ? this._config.bay_slots : [];
+    return raw.map((x) => (x === "" ? "" : x && typeof x === "object" ? { ...x } : { entity: x || null }));
+  }
+
+  _saveDisks(list) {
+    const out = { ...this._config };
+    delete out.bay_slots; // the editor list supersedes the YAML-only option
+    const tidy = list.map((x) => {
+      if (x === "") return "";
+      const o = Object.fromEntries(Object.entries(x).filter(([, v]) => v !== undefined && v !== null && v !== ""));
+      return Object.keys(o).length === 1 && o.entity ? o.entity : Object.keys(o).length ? o : null;
+    });
+    if (tidy.length) out.disks = tidy;
+    else delete out.disks;
+    this._emit(out);
+  }
+
+  _diskLabel(x) {
+    const st = this._hass && x.entity ? normState(this._hass.states[x.entity]) : null;
+    const name = x.name || (st ? diskName(st) : x.entity ? x.entity : "Choose a disk");
+    // has Scrutiny data? (explicit entity, or auto-match by serial / device name)
+    let smart = "";
+    if (st) {
+      const scr = Object.values(this._hass.states).map(normState).filter((e) => e.attributes.serial_number !== undefined);
+      const n = (v) => String(v || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      const dev = diskName(st).toLowerCase().replace(/n\d+$/, "");
+      const auto = scr.some((e) => (st.attributes.serial && n(e.attributes.serial_number) === n(st.attributes.serial)) ||
+        String(e.attributes.device_name || "").toLowerCase().replace(/n\d+$/, "") === dev);
+      smart = x.smart ? '<small class="sm-ok">SMART: set</small>' : auto ? '<small class="sm-ok">SMART: matched</small>' : scr.length ? '<small class="sm-no">SMART: not matched</small>' : "";
+    }
+    return `${esc(name)}${smart}`;
+  }
+
   _renderDisks() {
-    const list = Array.isArray(this._config.disks) ? [...this._config.disks]
-      : Array.isArray(this._config.bay_slots) ? [...this._config.bay_slots] : [];
-    const sig = JSON.stringify(list);
-    if (this._diskForms && this._diskSig === sig) return;
-    // picker edits don't change length/order of non-empty ids enough to need a rebuild
-    if (this._diskForms && this._diskForms.length === list.length && this._diskEdit) {
+    const list = this._diskEntries();
+    const shape = JSON.stringify(list.map((x) => (x === "" ? "" : "d")));
+    // field edits keep the same shape: refresh labels/data instead of rebuilding (keeps focus)
+    if (this._diskRows && this._diskShape === shape) {
+      this._diskRows.forEach((r, i) => {
+        if (!r || list[i] === "") return;
+        r.label.innerHTML = this._diskLabel(list[i]);
+        if (!this._diskEdit) r.form.data = list[i];
+      });
       this._diskEdit = false;
-      this._diskSig = sig;
       return;
     }
-    this._diskSig = sig;
-    const save = (l) => {
-      const out = { ...this._config };
-      delete out.bay_slots; // the editor list supersedes the YAML-only option
-      if (l.length) out.disks = l;
-      else delete out.disks;
-      this._emit(out);
+    this._diskShape = shape;
+    this._diskOpen = this._diskOpen || new Set();
+    const save = (l, rebuild) => {
+      if (rebuild) this._diskRows = null;
+      this._saveDisks(l);
       this._renderDisks();
     };
-    const cur = () => (Array.isArray(this._config.disks) ? [...this._config.disks] : [...list]);
-    const el = this._disksEl;
-    el.innerHTML = `<h3>Disks</h3><div class="hint">Leave empty to auto-detect. Add disks in bay order; use the arrows to move them and "empty bay" for unused slots.</div>`;
-    this._diskForms = list.map((id, i) => {
-      const row = document.createElement("div");
-      row.className = "tn-sec";
-      row.style.alignItems = "center";
-      const slot = document.createElement("div");
-      slot.style.cssText = "min-width:22px;text-align:center;opacity:.7";
-      slot.textContent = i + 1;
-      row.appendChild(slot);
-      let f = null;
-      if (id === "") {
-        const e = document.createElement("div");
-        e.style.cssText = "flex:1;opacity:.7;font-style:italic;padding:12px 4px";
-        e.textContent = "Empty bay";
-        row.appendChild(e);
+    const cur = () => this._diskEntries();
+    const el = this._collapse(this._disksEl, "disks", "Disks",
+      "Leave empty to auto-detect. Disks are shown in bay order: use the arrows to move them and \"empty bay\" for unused slots. Open a disk to rename it or pick its Scrutiny status sensor if it isn't matched automatically.",
+      list.length ? `${list.filter((x) => x !== "").length} disks` : "auto");
+    this._diskRows = list.map((x, i) => {
+      const box = document.createElement("div");
+      box.className = "tn-disk" + (this._diskOpen.has(i) || x === "" ? "" : " closed");
+      const head = document.createElement("div");
+      head.className = "dh";
+      head.innerHTML = `<span style="min-width:22px;text-align:center;opacity:.7">${i + 1}</span>`;
+      const label = document.createElement("div");
+      label.className = "dn";
+      if (x === "") {
+        label.innerHTML = "<i style='opacity:.7'>Empty bay</i>";
+        label.style.cursor = "default";
       } else {
-        f = document.createElement("ha-form");
-        f.style.flex = "1";
-        f.schema = [{ name: "entity", selector: { entity: { domain: "sensor" } } }];
-        f.computeLabel = () => "";
-        if (this._hass) f.hass = this._hass;
-        f.data = { entity: id || undefined };
-        f.addEventListener("value-changed", (ev) => {
-          ev.stopPropagation();
-          const l = cur();
-          l[i] = ev.detail.value.entity || null;
-          this._diskEdit = true;
-          save(l);
+        label.innerHTML = this._diskLabel(x);
+        label.title = "Click to edit";
+        label.addEventListener("click", () => {
+          this._diskOpen.has(i) ? this._diskOpen.delete(i) : this._diskOpen.add(i);
+          box.classList.toggle("closed");
         });
-        row.appendChild(f);
       }
-      const btn = (label, title, dis, fn) => {
+      head.appendChild(label);
+      const btn = (text, title, dis, fn) => {
         const b = document.createElement("button");
         b.className = "tn-mv";
         b.title = title;
-        b.textContent = label;
+        b.textContent = text;
         b.disabled = dis;
         b.addEventListener("click", fn);
-        row.appendChild(b);
+        head.appendChild(b);
+      };
+      const swapOpen = (p, q) => {
+        const a = this._diskOpen.has(p), b = this._diskOpen.has(q);
+        a ? this._diskOpen.add(q) : this._diskOpen.delete(q);
+        b ? this._diskOpen.add(p) : this._diskOpen.delete(p);
       };
       const move = (d) => {
         const l = cur();
         [l[i], l[i + d]] = [l[i + d], l[i]];
-        this._diskForms = null;
-        save(l);
+        swapOpen(i, i + d);
+        save(l, true);
       };
       btn("▲", "Move up", i === 0, () => move(-1));
       btn("▼", "Move down", i === list.length - 1, () => move(1));
       btn("✕", "Remove", false, () => {
         const l = cur();
         l.splice(i, 1);
-        this._diskForms = null;
-        save(l);
+        this._diskOpen = new Set([...this._diskOpen].filter((k) => k !== i).map((k) => (k > i ? k - 1 : k)));
+        save(l, true);
       });
-      el.appendChild(row);
-      return f;
+      box.appendChild(head);
+      let form = null;
+      if (x !== "") {
+        const body = document.createElement("div");
+        body.className = "db";
+        form = document.createElement("ha-form");
+        form.schema = [
+          { name: "entity", selector: { entity: { domain: "sensor" } } },
+          { name: "smart", selector: { entity: { domain: "sensor" } } },
+          { name: "name", selector: { text: {} } },
+        ];
+        form.computeLabel = (sch) =>
+          ({ entity: "Disk (TrueNAS disk sensor)", smart: "Scrutiny status sensor (only if not matched automatically)", name: "Display name (optional)" })[sch.name];
+        if (this._hass) form.hass = this._hass;
+        form.data = x;
+        form.addEventListener("value-changed", (ev) => {
+          ev.stopPropagation();
+          const l = cur();
+          l[i] = { ...ev.detail.value };
+          this._diskEdit = true;
+          save(l, false);
+        });
+        body.appendChild(form);
+        box.appendChild(body);
+      }
+      el.appendChild(box);
+      return { label, form };
     });
     const bar = document.createElement("div");
     bar.style.cssText = "display:flex;gap:8px;flex-wrap:wrap";
-    const add = (label, value) => {
+    const add = (text, fn) => {
       const b = document.createElement("button");
       b.className = "tn-btn";
-      b.textContent = label;
-      b.addEventListener("click", () => {
-        this._diskForms = null;
-        // start from the auto-detected order the first time, so nothing disappears
-        let l = cur();
-        if (!l.length && this._autoDisks) l = [...this._autoDisks];
-        save([...l, value]);
-      });
+      b.textContent = text;
+      b.addEventListener("click", fn);
       bar.appendChild(b);
     };
-    add("+ Add disk", null);
-    add("+ Empty bay", "");
-    if (!list.length) {
-      const b = document.createElement("button");
-      b.className = "tn-btn";
-      b.textContent = "Use detected disks";
-      b.addEventListener("click", () => {
-        this._diskForms = null;
-        if (this._autoDisks && this._autoDisks.length) save([...this._autoDisks]);
-      });
-      bar.appendChild(b);
-    }
+    add("+ Add disk", () => {
+      let l = cur();
+      if (!l.length && this._autoDisks) l = this._autoDisks.map((e) => ({ entity: e }));
+      l.push({ entity: null });
+      this._diskOpen.add(l.length - 1);
+      save(l, true);
+    });
+    add("+ Empty bay", () => {
+      let l = cur();
+      if (!l.length && this._autoDisks) l = this._autoDisks.map((e) => ({ entity: e }));
+      l.push("");
+      save(l, true);
+    });
+    if (!list.length) add("Use detected disks", () => this._autoDisks && this._autoDisks.length && save(this._autoDisks.map((e) => ({ entity: e })), true));
     el.appendChild(bar);
+  }
+
+  // Turns a container into a collapsible block; returns the body element to fill.
+  _collapse(el, key, title, hint, count) {
+    this._closedBlocks = this._closedBlocks || new Set();
+    el.classList.add("tn-coll");
+    el.classList.toggle("closed", this._closedBlocks.has(key));
+    el.innerHTML = `<div class="tn-ch"><span class="chev">▾</span><h3>${title}</h3>${count != null ? `<span class="cnt">${count}</span>` : ""}</div>
+      <div class="tn-cb">${hint ? `<div class="hint" style="font-size:.85em;opacity:.7;margin-bottom:8px">${hint}</div>` : ""}</div>`;
+    el.querySelector(".tn-ch").addEventListener("click", () => {
+      this._closedBlocks.has(key) ? this._closedBlocks.delete(key) : this._closedBlocks.add(key);
+      el.classList.toggle("closed");
+    });
+    return el.querySelector(".tn-cb");
   }
 
   _renderSections() {
@@ -1051,8 +1151,7 @@ class TrueNASCardEditor extends HTMLElement {
       this._renderSections();
     };
     const on = new Set(cur);
-    const el = this._secEl;
-    el.innerHTML = `<h3>Sections</h3><div class="hint" style="font-size:.85em;opacity:.7;margin-bottom:8px">Tick to show, use the arrows to change the order.</div>`;
+    const el = this._collapse(this._secEl, "sections", "Sections", "Tick to show, use the arrows to change the order.", `${cur.length} shown`);
     order.forEach((k, i) => {
       const row = document.createElement("div");
       row.className = "tn-sec" + (on.has(k) ? "" : " off");
@@ -1082,8 +1181,7 @@ class TrueNASCardEditor extends HTMLElement {
       this._poolForms.forEach((f, i) => (f.data = list[i]));
       return;
     }
-    const el = this._poolsEl;
-    el.innerHTML = `<h3>Pools</h3><div class="hint">Leave empty to auto-detect. Add a pool to choose its health, scrub and size entities yourself.</div>`;
+    const el = this._collapse(this._poolsEl, "pools", "Pools", "Leave empty to auto-detect. Add a pool to choose its health, scrub and size entities yourself.", list.length ? `${list.length}` : "auto");
     this._poolForms = list.map((p, i) => {
       const box = document.createElement("div");
       box.className = "tn-pool";
