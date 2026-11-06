@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.7.0";
+const CARD_VERSION = "2.8.0";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -18,6 +18,7 @@ const DEFAULTS = {
   bay_slots: null, // explicit slot order: list of disk entity ids, "" for an empty slot
   bay_vertical: true, // tall trays (default); set false for wide trays
   controls: true, // start/stop buttons on apps, VMs and services
+  scrutiny: true, // use SMART data from the Scrutiny integration when found
   warn_temp: 45,
   crit_temp: 55,
   warn_pct: 80,
@@ -99,6 +100,10 @@ const STYLE = `
   .bay.empty .tray { border:2px dashed var(--divider-color,rgba(127,127,127,.4)); background:none; }
   .bay.empty .led, .bay.empty .hd { display:none; }
   .bay .bn.bs { margin-top:-3px; opacity:.8; }
+  .bay .sm { text-align:center; font-size:.72em; font-weight:600; color:var(--tone); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .bay .sm.ok { color:var(--success-color,#43a047); } .bay .sm.warn { color:var(--warning-color,#ffa600); }
+  .bay .sm.bad { color:var(--error-color,#db4437); } .bay .sm.off { color:var(--secondary-text-color); }
+  .tray .flag { position:absolute; left:50%; bottom:16px; transform:translateX(-50%); font-weight:700; font-size:.9em; color:var(--tone); }
   .bay .bn { text-align:center; font-size:.78em; color:var(--secondary-text-color); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .empty { padding:8px 4px; color:var(--secondary-text-color); font-size:.9em; }
 `;
@@ -508,6 +513,78 @@ class TrueNASCard extends HTMLElement {
     return [b, t].filter(Boolean).join(" ");
   }
 
+  // ---------- Scrutiny (ha_scrutiny integration) ----------
+  // Groups Scrutiny sensors by serial_number. Returns Map(normSerial -> info) plus a device_name index.
+  _scrutinyData() {
+    const norm = (x) => String(x || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const bySerial = new Map(), byDev = new Map();
+    if (this._config.scrutiny === false) return { bySerial, byDev, ents: [] };
+    const ents = [];
+    for (const s of Object.values(this._hass.states)) {
+      const a = s.attributes;
+      if (!s.entity_id.startsWith("sensor.") || a.serial_number === undefined) continue;
+      ents.push(s);
+      const k = norm(a.serial_number);
+      if (!bySerial.has(k)) bySerial.set(k, { serial: a.serial_number, dev: a.device_name, ents: [] });
+      const info = bySerial.get(k);
+      info.ents.push(s);
+      const id = s.entity_id;
+      if (/_overall_status$/.test(id)) info.status = s;
+      else if (/_smart_test_result$/.test(id)) info.test = s;
+      else if (/_power_on_time$/.test(id)) info.pot = s;
+      else if (/_power_cycle_count$/.test(id)) info.cycles = s;
+      else if (/_last_smart_update$/.test(id)) info.last = s;
+      else if (/_temperature$/.test(id)) info.temp = s;
+      else if (/_capacity$/.test(id)) info.cap = s;
+      if (a.device_name) byDev.set(String(a.device_name).toLowerCase(), info);
+    }
+    return { bySerial, byDev, ents, norm };
+  }
+
+  _smartFor(d) {
+    const sc = this._scr;
+    if (!sc || !sc.bySerial.size) return null;
+    const a = d.attributes;
+    return (a.serial && sc.bySerial.get(sc.norm(a.serial))) || sc.byDev.get(diskName(d).toLowerCase()) || null;
+  }
+
+  // "ok" | "warn" | "bad" | "off" plus a short label
+  _smartState(info) {
+    if (!info) return null;
+    const st = info.status && info.status.state, tr = info.test && info.test.state;
+    const v = `${st || ""} ${tr || ""}`;
+    if (/failed/i.test(v)) return { tone: "bad", label: "SMART failed" };
+    if (/warning/i.test(v)) return { tone: "warn", label: "SMART warning" };
+    if (/passed/i.test(st || tr || "")) return { tone: "ok", label: "SMART passed" };
+    return { tone: "off", label: "SMART unknown" };
+  }
+
+  _smartTip(info) {
+    if (!info) return "";
+    const out = [];
+    const val = (e) => (e && !/^(unknown|unavailable)$/i.test(e.state) ? e.state : null);
+    if (val(info.status)) out.push(`Scrutiny status: ${info.status.state}`);
+    if (val(info.test)) out.push(`SMART test: ${info.test.state}`);
+    if (val(info.pot)) {
+      const n = num(info.pot.state), u = info.pot.attributes.unit_of_measurement || "";
+      const days = u === "h" ? n / 24 : u === "min" ? n / 1440 : n;
+      out.push(`Power-on: ${days >= 365 ? (days / 365).toFixed(1) + " years" : Math.round(days) + " days"}`);
+    }
+    if (val(info.cycles)) out.push(`Power cycles: ${info.cycles.state}`);
+    // any other numeric Scrutiny sensors (e.g. reallocated sectors), labelled by their name
+    const known = new Set([info.status, info.test, info.pot, info.cycles, info.last, info.temp, info.cap].filter(Boolean));
+    for (const e of info.ents) {
+      if (known.has(e) || num(e.state) == null) continue;
+      const label = String(e.attributes.friendly_name || e.entity_id).replace(/^.*\)\s*/, "");
+      out.push(`${label}: ${e.state}${e.attributes.unit_of_measurement ? " " + e.attributes.unit_of_measurement : ""}`);
+    }
+    if (val(info.last)) {
+      const t = new Date(info.last.state);
+      if (!isNaN(t)) out.push(`Last SMART update: ${t.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`);
+    }
+    return out.join("\n");
+  }
+
   _bays(disks) {
     const c = this._config;
     const sorted = [...disks].sort((a, b) => a.entity_id.localeCompare(b.entity_id, undefined, { numeric: true }));
@@ -524,12 +601,17 @@ class TrueNASCard extends HTMLElement {
     const cells = slots.map((d, i) => {
       if (!d) return `<div class="bay empty t-off"><div class="tray"><span class="no">${i + 1}</span></div><div class="bn">empty</div></div>`;
       const a = d.attributes, t = num(d.state);
-      const tone = d.state === "unavailable" ? "off" : t == null ? "off" : this._tempTone(t);
+      let tone = d.state === "unavailable" ? "off" : t == null ? "off" : this._tempTone(t);
+      const info = this._smartFor(d), sm = this._smartState(info);
+      // SMART failure / warning overrides a normal temperature colour
+      if (sm && sm.tone === "bad") tone = "bad";
+      else if (sm && sm.tone === "warn" && tone === "ok") tone = "warn";
       const name = diskName(d);
-      const tip = [name, this._kind(d), cleanModel(a.model), fmtDrive(a.size), a.rotationrate > 0 ? a.rotationrate + " rpm" : "", a.serial].filter(Boolean).join(" · ");
+      const tip = [[name, this._kind(d), cleanModel(a.model), fmtDrive(a.size), a.rotationrate > 0 ? a.rotationrate + " rpm" : "", a.serial].filter(Boolean).join(" · "), this._smartTip(info)].filter(Boolean).join("\n");
+      const flag = sm && (sm.tone === "bad" || sm.tone === "warn") ? `<span class="flag">${sm.tone === "bad" ? "✕" : "!"}</span>` : "";
       return `<div class="bay t-${tone}" data-e="${esc(d.entity_id)}" title="${esc(tip)}">
-        <div class="tray"><span class="led"></span><span class="no">${i + 1}</span><span class="tt">${t == null ? "–" : t.toFixed(0) + "°"}</span><span class="hd"></span></div>
-        <div class="bn">${esc(name)}${this._kind(d) ? " · " + esc(this._kind(d)) : ""}</div>${a.size ? `<div class="bn bs">${esc(fmtDrive(a.size))}</div>` : ""}</div>`;
+        <div class="tray"><span class="led"></span><span class="no">${i + 1}</span><span class="tt">${t == null ? "–" : t.toFixed(0) + "°"}</span>${flag}<span class="hd"></span></div>
+        <div class="bn">${esc(name)}${this._kind(d) ? " · " + esc(this._kind(d)) : ""}</div>${a.size ? `<div class="bn bs">${esc(fmtDrive(a.size))}</div>` : ""}${sm ? `<div class="sm ${sm.tone}">${esc(sm.label)}</div>` : ""}</div>`;
     });
     return `<div class="bays-wrap">
       <div class="chassis ${c.bay_vertical ? "vert" : ""}" style="--cols:${cols}">${cells.join("")}</div></div>`;
@@ -544,7 +626,8 @@ class TrueNASCard extends HTMLElement {
     const capSig = Object.values(this._hass.states)
       .filter((s) => s.entity_id.startsWith("sensor.") && /free|total|used/i.test(s.entity_id) && s.entity_id.toLowerCase().includes((c.prefix || "").toLowerCase()))
       .map((s) => s.state).join(",");
-    const sig = ids.map((e) => `${e.entity_id}|${e.state}|${e.last_updated}`).join(";") + capSig + JSON.stringify(c.sections);
+    this._scr = this._scrutinyData();
+    const sig = this._scr.ents.map((e) => e.state).join(",") + ids.map((e) => `${e.entity_id}|${e.state}|${e.last_updated}`).join(";") + capSig + JSON.stringify(c.sections);
     if (sig === this._sig) return;
     this._sig = sig;
 
@@ -552,10 +635,14 @@ class TrueNASCard extends HTMLElement {
     const updCount = d.apps.filter((a) => a.attributes.update_available === true || a.attributes.update_available === "true").length;
     const badPools = d.pools.filter((p) => this._poolHealthy(p) === false).length + d.manualPools.filter((m) => m.healthy === false).length;
     const hotDisks = d.disks.filter((x) => (num(x.state) ?? 0) >= c.crit_temp).length;
+    const smart = d.disks.map((x) => this._smartState(this._smartFor(x))).filter(Boolean);
+    const smartBad = smart.filter((x) => x.tone === "bad").length, smartWarn = smart.filter((x) => x.tone === "warn").length;
 
     let tone = "ok", sub = "All healthy";
     if (badPools) { tone = "bad"; sub = `${badPools} pool${badPools > 1 ? "s" : ""} unhealthy`; }
+    else if (smartBad) { tone = "bad"; sub = `${smartBad} disk${smartBad > 1 ? "s" : ""} failing SMART`; }
     else if (hotDisks) { tone = "bad"; sub = `${hotDisks} disk${hotDisks > 1 ? "s" : ""} too hot`; }
+    else if (smartWarn) { tone = "warn"; sub = `${smartWarn} disk SMART warning${smartWarn > 1 ? "s" : ""}`; }
     else if (updCount) { tone = "warn"; sub = `${updCount} update${updCount > 1 ? "s" : ""} available`; }
     const stopped = [...d.apps, ...d.vms].filter((e) => !isOn(e)).length;
     if (tone === "ok" && stopped) sub = `${stopped} stopped`;
@@ -570,9 +657,10 @@ class TrueNASCard extends HTMLElement {
       else if (key === "pools") body += `<div class="block"><div class="stitle">Pools</div>${d.pools.length + d.manualPools.length ? d.pools.map((p) => this._poolItem(p)).join("") + d.manualPools.map((m) => this._manualPoolItem(m)).join("") : `<div class="empty">No pools found. Add them under Pools in the card editor.</div>`}</div>`;
       else if (key === "disks") {
         const disks = d.disks;
-        const t = hotDisks ? "bad" : disks.some((x) => (num(x.state) ?? 0) >= c.warn_temp) ? "warn" : disks.length ? "ok" : "off";
+        const t = hotDisks || smartBad ? "bad" : smartWarn || disks.some((x) => (num(x.state) ?? 0) >= c.warn_temp) ? "warn" : disks.length ? "ok" : "off";
         const hot = disks.length ? Math.max(...disks.map((x) => num(x.state) ?? -Infinity)) : null;
-        const label = `Disks · ${disks.length} ${disks.length === 1 ? "drive" : "drives"}` + (Number.isFinite(hot) ? ` · max ${hot.toFixed(0)}°C` : "");
+        const label = `Disks · ${disks.length} ${disks.length === 1 ? "drive" : "drives"}` + (Number.isFinite(hot) ? ` · max ${hot.toFixed(0)}°C` : "") +
+          (smartBad ? ` · ${smartBad} failing` : smartWarn ? ` · ${smartWarn} warning` : smart.length ? " · SMART OK" : "");
         body += this._group(key, t, label, disks.length || c.bay_count || Array.isArray(c.bay_slots) || (Array.isArray(c.disks) && c.disks.length) ? this._bays(disks) : "");
       } else if (key === "apps") {
         const run = d.apps.filter(isOn).length;
@@ -632,6 +720,7 @@ const LABELS = {
   prefix: "Entity prefix (optional, biases discovery)",
   expand: "Panels that start open",
   controls: "Show start / stop buttons",
+  scrutiny: "Use Scrutiny SMART data (if installed)",
   bay_vertical: "Tall drive trays",
   bay_columns: "Bays per row (blank = auto)",
   bay_count: "Total physical bays (blank = auto)",
@@ -682,6 +771,7 @@ const EDITOR_SCHEMA = [
     },
   },
   { name: "controls", selector: { boolean: {} } },
+  { name: "scrutiny", selector: { boolean: {} } },
   { name: "bay_vertical", selector: { boolean: {} } },
   {
     type: "grid",
