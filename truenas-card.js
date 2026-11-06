@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.5.0";
+const CARD_VERSION = "2.6.0";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -566,9 +566,7 @@ class TrueNASCard extends HTMLElement {
     for (const key of c.sections) {
       if (key === "system") body += `<div class="block"><div class="stitle">System</div>${this._systemItem(d.system)}</div>`;
       else if (key === "pools") body += `<div class="block"><div class="stitle">Pools</div>${d.pools.length + d.manualPools.length ? d.pools.map((p) => this._poolItem(p)).join("") + d.manualPools.map((m) => this._manualPoolItem(m)).join("") : `<div class="empty">No pools found. Add them under Pools in the card editor.</div>`}</div>`;
-    }
-    for (const key of c.sections) {
-      if (key === "disks") {
+      else if (key === "disks") {
         const disks = d.disks;
         const t = hotDisks ? "bad" : disks.some((x) => (num(x.state) ?? 0) >= c.warn_temp) ? "warn" : disks.length ? "ok" : "off";
         const hot = disks.length ? Math.max(...disks.map((x) => num(x.state) ?? -Infinity)) : null;
@@ -630,7 +628,6 @@ class TrueNASCard extends HTMLElement {
 const LABELS = {
   title: "Title",
   prefix: "Entity prefix (optional, biases discovery)",
-  sections: "Sections to show",
   expand: "Panels that start open",
   controls: "Show start / stop buttons",
   bay_vertical: "Tall drive trays",
@@ -669,23 +666,6 @@ const EDITOR_SCHEMA = [
   { name: "disks", selector: { entity: { multiple: true, domain: "sensor" } } },
   { name: "apps", selector: { entity: { multiple: true, domain: ["binary_sensor", "switch"] } } },
   { name: "vms", selector: { entity: { multiple: true, domain: ["binary_sensor", "switch"] } } },
-  {
-    name: "sections",
-    selector: {
-      select: {
-        multiple: true,
-        mode: "list",
-        options: [
-          { value: "system", label: "System" },
-          { value: "pools", label: "Pools" },
-          { value: "disks", label: "Disks (drive bays)" },
-          { value: "apps", label: "Apps" },
-          { value: "vms", label: "Virtual machines" },
-          { value: "services", label: "Services" },
-        ],
-      },
-    },
-  },
   {
     name: "expand",
     selector: {
@@ -775,6 +755,16 @@ class TrueNASCardEditor extends HTMLElement {
         .tn-pool .bar { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-weight:500; }
         .tn-btn { font:inherit; cursor:pointer; border:none; border-radius:18px; padding:6px 14px;
           background:var(--primary-color,#03a9f4); color:var(--text-primary-color,#fff); }
+        .tn-secs { margin:4px 0 8px; }
+        .tn-secs h3, .tn-pools h3 { font-size:1em; font-weight:500; margin:0 0 4px; }
+        .tn-sec { display:flex; align-items:center; gap:8px; padding:6px 8px; border:1px solid var(--divider-color,#ccc);
+          border-radius:10px; margin-bottom:6px; }
+        .tn-sec.off { opacity:.55; }
+        .tn-sec label { flex:1; display:flex; align-items:center; gap:8px; cursor:pointer; }
+        .tn-mv { font:inherit; width:32px; height:32px; border-radius:50%; border:none; cursor:pointer; background:none;
+          color:var(--primary-text-color); font-size:1.1em; }
+        .tn-mv:hover:not(:disabled) { background:var(--secondary-background-color,rgba(127,127,127,.2)); }
+        .tn-mv:disabled { opacity:.25; cursor:default; }
         .tn-btn.rm { background:none; color:var(--error-color,#db4437); padding:4px 8px; }
       `;
       this.appendChild(style);
@@ -783,6 +773,10 @@ class TrueNASCardEditor extends HTMLElement {
       this._form.computeLabel = (s) => LABELS[s.name] || s.name;
       this._form.schema = EDITOR_SCHEMA;
       this._form.addEventListener("value-changed", (ev) => this._changed(ev.detail.value));
+
+      this._secEl = document.createElement("div");
+      this._secEl.className = "tn-secs";
+      this.appendChild(this._secEl);
 
       this._poolsEl = document.createElement("div");
       this._poolsEl.className = "tn-pools";
@@ -797,7 +791,46 @@ class TrueNASCardEditor extends HTMLElement {
     if (this._hass) this._form.hass = this._hass;
     const norm = (l) => (Array.isArray(l) ? [...new Set(l.map((k) => (k === "bays" ? "disks" : k)))] : l);
     this._form.data = { ...DEFAULTS, ...this._config, sections: norm(this._config.sections ?? DEFAULTS.sections), expand: norm(this._config.expand ?? DEFAULTS.expand) };
+    this._renderSections();
     this._renderPools();
+  }
+
+  _renderSections() {
+    const ALL = ["system", "pools", "disks", "apps", "vms", "services"];
+    const NAMES = { system: "System", pools: "Pools", disks: "Disks (drive bays)", apps: "Apps", vms: "Virtual machines", services: "Services" };
+    const cur = [...new Set((this._config.sections || DEFAULTS.sections).map((k) => (k === "bays" ? "disks" : k)))].filter((k) => ALL.includes(k));
+    const order = [...cur, ...ALL.filter((k) => !cur.includes(k))];
+    const save = (on, ord) => {
+      const sections = ord.filter((k) => on.has(k));
+      const out = { ...this._config };
+      if (JSON.stringify(sections) === JSON.stringify(DEFAULTS.sections)) delete out.sections;
+      else out.sections = sections;
+      this._emit(out);
+      this._renderSections();
+    };
+    const on = new Set(cur);
+    const el = this._secEl;
+    el.innerHTML = `<h3>Sections</h3><div class="hint" style="font-size:.85em;opacity:.7;margin-bottom:8px">Tick to show, use the arrows to change the order.</div>`;
+    order.forEach((k, i) => {
+      const row = document.createElement("div");
+      row.className = "tn-sec" + (on.has(k) ? "" : " off");
+      row.innerHTML = `<label><input type="checkbox" ${on.has(k) ? "checked" : ""}>${NAMES[k]}</label>
+        <button class="tn-mv" title="Move up" ${i === 0 ? "disabled" : ""}>▲</button>
+        <button class="tn-mv" title="Move down" ${i === order.length - 1 ? "disabled" : ""}>▼</button>`;
+      row.querySelector("input").addEventListener("change", (ev) => {
+        ev.target.checked ? on.add(k) : on.delete(k);
+        save(on, order);
+      });
+      const [up, down] = row.querySelectorAll(".tn-mv");
+      const move = (d) => {
+        const o = [...order];
+        [o[i], o[i + d]] = [o[i + d], o[i]];
+        save(on, o);
+      };
+      up.addEventListener("click", () => move(-1));
+      down.addEventListener("click", () => move(1));
+      el.appendChild(row);
+    });
   }
 
   _renderPools() {
@@ -857,7 +890,7 @@ class TrueNASCardEditor extends HTMLElement {
   _changed(value) {
     const out = { ...this._config };
     for (const [k, v] of Object.entries(value || {})) {
-      if (k === "pools") continue; // managed by the pool editor
+      if (k === "pools" || k === "sections") continue; // managed by their own editors
       const empty = v === undefined || v === null || v === "" || (Array.isArray(v) && !v.length && k !== "expand" && k !== "sections");
       const isDefault = k in DEFAULTS && JSON.stringify(DEFAULTS[k]) === JSON.stringify(v);
       if (empty || isDefault) delete out[k];
