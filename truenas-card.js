@@ -6,7 +6,7 @@
  * Entities are auto-discovered from their attributes; everything can be overridden in YAML.
  */
 
-const CARD_VERSION = "2.9.0";
+const CARD_VERSION = "2.9.1";
 
 const DEFAULTS = {
   title: "TrueNAS",
@@ -30,7 +30,7 @@ const GROUP_ICON = { disks: "mdi:harddisk", apps: "mdi:docker", vms: "mdi:monito
 
 const STYLE = `
   :host { display:block; }
-  ha-card { display:block; box-sizing:border-box; padding:16px; overflow:hidden; --tn-ring:#fff; }
+  ha-card { display:block; box-sizing:border-box; padding:16px; overflow:hidden; font-size:.9em; --tn-ring:#fff; }
   .t-ok { --tone:var(--success-color,#43a047); } .t-warn { --tone:var(--warning-color,#ffa600); }
   .t-bad { --tone:var(--error-color,#db4437); } .t-off { --tone:var(--disabled-color,#9e9e9e); }
   .tint { background:color-mix(in srgb, var(--tone) 18%, transparent); color:var(--tone); }
